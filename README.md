@@ -120,6 +120,18 @@ The provided notebook `example.ipynb` shows how to use the FlowMo tokenizer to r
 python3 -m ipykernel install --user --name FlowMo
 ```
 
+## Resource requirements and smaller models
+Our main two models were trained on 8 H100 GPUs. However, if your computational resources are more limited, you may attain comparable though slightly worse performance by reducing the width and increasing the patch size, like so:
+```
+torchrun --nproc-per-node=8 -m flowmo.train \
+    --experiment-name "flowmo_lo_pretrain_smaller" \
+    model.context_dim=18 model.codebook_size_for_entropy=9 \
+    model.patch_size=8 \
+    model.mup_width=4 \
+    trainer.max_steps=1300000
+```
+Still, to reproduce the performance of the models in the paper, you will need to use the larger model configurations.
+
 ## Acknowledgement
 Our code base was based off https://github.com/TencentARC/SEED-Voken. We also use code from https://github.com/markweberdev/maskbit and https://github.com/black-forest-labs/flux. Thanks for the great contributions.
 
