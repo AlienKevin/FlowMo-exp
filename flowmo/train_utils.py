@@ -21,6 +21,7 @@ from flowmo import data, models
 def get_args_and_unknown():
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", type=str, default="results")
+    parser.add_argument("--experiment-name", type=str, default="my_experiment")
     parser.add_argument("--resume-from-ckpt", type=str, default="")
     
     # arguments for slurm (unused in code release)

@@ -15,6 +15,7 @@ cd FlowMo
 ## Install the requirements
 ```
 conda create -n FlowMo python=3.13.2 pip
+conda activate FlowMo
 pip install torch==2.6.0 torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
@@ -35,11 +36,13 @@ FlowMo is trained in two stages. The first stage is standard diffusion autoencod
 
 The training commands for FlowMo-Lo are below. It is recommended to pre-train FlowMo-Lo for ~130 epochs minimum to match the paper result, but you may increase `trainer.max_steps` for better performance.
 ```
-EXP_NAME="flowmo_lo_pretrain" torchrun --nproc-per-node=8 -m flowmo.train \
+torchrun --nproc-per-node=8 -m flowmo.train \
+    --experiment-name "flowmo_lo_pretrain" \
     model.context_dim=18 model.codebook_size_for_entropy=9 \
     trainer.max_steps=1300000
 
-EXP_NAME="flowmo_lo_posttrain" torchrun --nproc-per-node=8 -m flowmo.train \
+torchrun --nproc-per-node=8 -m flowmo.train \
+    --experiment-name "flowmo_lo_posttrain" \
     --resume-from-ckpt ... \
     model.context_dim=18 model.codebook_size_for_entropy=9 \
     trainer.max_steps=1325000
@@ -55,11 +58,13 @@ EXP_NAME="flowmo_lo_posttrain" torchrun --nproc-per-node=8 -m flowmo.train \
 ```
 The training commands for FlowMo-Hi are below. It is recommended to pre-train FlowMo-Hi for ~80 epochs minimum to match the paper result, but you may increase `trainer.max_steps` for better performance. 
 ```
-EXP_NAME="flowmo_hi_pretrain" torchrun --nproc-per-node=8 -m flowmo.train \
+torchrun --nproc-per-node=8 -m flowmo.train \
+    --experiment-name "flowmo_hi_pretrain" \
     model.context_dim=56 model.codebook_size_for_entropy=14 \
     trainer.max_steps=800000
 
-EXP_NAME="flowmo_hi_posttrain" torchrun --nproc-per-node=8 -m flowmo.train \
+torchrun --nproc-per-node=8 -m flowmo.train \
+    --experiment-name "flowmo_hi_posttrain" \
     --resume-from-ckpt ... \
     model.context_dim=56 model.codebook_size_for_entropy=14 \
     trainer.max_steps=825000
@@ -78,7 +83,8 @@ EXP_NAME="flowmo_hi_posttrain" torchrun --nproc-per-node=8 -m flowmo.train \
 To evaluate an experiment (continuously as new checkpoints are added, or just latest checkpoint if continuous=False), run
 
 ```
-EXP_NAME="flowmo_lo_pretrain" torchrun --nproc-per-node=1 -m flowmo.evaluate \
+torchrun --nproc-per-node=1 -m flowmo.evaluate \
+    --experiment-name flowmo_lo_prettrain_eval \
     eval.eval_dir=results/flowmo_lo_prettrain \
     eval.continuous=true \
     model.context_dim=18 model.codebook_size_for_entropy=9
@@ -86,16 +92,18 @@ EXP_NAME="flowmo_lo_pretrain" torchrun --nproc-per-node=1 -m flowmo.evaluate \
 
 To reproduce the results of the paper, the commands below will reproduce the performance of FlowMo-Lo and FlowMo-Hi respectively, assuming you have already downloaded the necessary checkpoints (see next section).
 ```
-EXP_NAME="flowmo_lo_posttrain" torchrun --nproc-per-node=1 -m flowmo.evaluate \
+torchrun --nproc-per-node=1 -m flowmo.evaluate \
+    --experiment-name "flowmo_lo_posttrain_eval" \
     eval.eval_dir=results/flowmo_lo_posttrain \
     eval.continuous=false \
     eval.force_ckpt_path='flowmo_lo.pth' \
     model.context_dim=18 model.codebook_size_for_entropy=9
 
-EXP_NAME="flowmo_hi_posttrain" torchrun --nproc-per-node=1 -m flowmo.evaluate \
+torchrun --nproc-per-node=1 -m flowmo.evaluate \
+    --experiment-name "flowmo_hi_posttrain_eval" \
     eval.eval_dir=results/flowmo_hi_posttrain \
     eval.continuous=false \
-    eval.force_ckpt_path='flowmo_lo.pth' \
+    eval.force_ckpt_path='flowmo_hi.pth' \
     model.context_dim=56 model.codebook_size_for_entropy=14
 ```
 To speed up eval, you may subsample the data by passing eval.subsample_rate=N to subsample the validation dataset by NX, so that 10 corresponds to 10x subsampling, etc. Note that this will lead to less accurate rFID estimates. Also, the evaluator is distributed, so if you increase --nproc-per-node the evaluation will finish correspondingly faster.

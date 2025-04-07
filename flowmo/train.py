@@ -89,7 +89,7 @@ def main(args, config):
     print(rank)
     dist.barrier()
 
-    log_dir = os.path.join(args.results_dir, os.environ["EXP_NAME"])
+    log_dir = os.path.join(args.results_dir, args.experiment_name)
     os.makedirs(log_dir, exist_ok=True)
 
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(

@@ -338,7 +338,7 @@ def _safe_load(checkpoint_path):
             time.sleep(30)
 
 
-def main(config):
+def main(args, config):
     config = train_utils.restore_config(config)
 
     torch.multiprocessing.set_start_method("forkserver", force=True)
@@ -372,7 +372,7 @@ def main(config):
     torch.cuda.set_device(device)
 
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(
-        eval_dir, f"torchinductor_ksarge_{os.environ['EXP_NAME']}_{str(rank)}"
+        eval_dir, f"torchinductor_ksarge_{args.experiment_name}_{str(rank)}"
     )
     main_tag = "eval/"
 
@@ -414,6 +414,6 @@ def main(config):
 if __name__ == "__main__":
     try:
         args, config = train_utils.get_args_and_config()
-        main(config)
+        main(args, config)
     finally:
         torch.distributed.destroy_process_group()
