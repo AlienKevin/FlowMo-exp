@@ -75,10 +75,6 @@ def train_step(config, model, batch, optimizer, aux_state):
 
 
 def main(args, config):
-    try:
-        print("affinity", os.sched_getaffinity(0))
-    except:
-        pass
     config = train_utils.restore_config(config)
     print(torch.__version__)
     models.MUP_ENABLED = config.model.enable_mup
@@ -174,7 +170,6 @@ def main(args, config):
     tic = time.time()
     dl_iter = iter(train_utils.wrap_dataloader(train_dataloader))
 
-    # TODO: Add EMA.
     print("Training begins.")
     print(args)
     print(OmegaConf.to_yaml(config))
@@ -319,7 +314,6 @@ def main(args, config):
                             "model_state_dict": train_utils.cpu_state_dict(
                                 model.module
                             ),
-                            # "optimizer_state_dict": optimizer.state_dict(),
                         },
                         local_checkpoint_path,
                     )
@@ -372,7 +366,6 @@ def main(args, config):
                             "model_state_dict": train_utils.cpu_state_dict(
                                 model.module
                             ),
-                            # "optimizer_state_dict": optimizer.state_dict(),
                         },
                         checkpoint_path,
                     )
