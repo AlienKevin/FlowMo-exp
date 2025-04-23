@@ -57,11 +57,29 @@ torchrun --nproc-per-node=8 -m flowmo.train \
     trainer.keep_every=5000 \
 ```
 The training commands for FlowMo-Hi are below. It is recommended to pre-train FlowMo-Hi for ~80 epochs minimum to match the paper result, but you may increase `trainer.max_steps` for better performance. 
+
+kl:
 ```
-torchrun --nproc-per-node=8 -m flowmo.train \
+torchrun --nproc-per-node=4 -m flowmo.train \
+    --experiment-name "flowmo_hi_kl_pretrain" \
+    model.context_dim=768 model.quantization_type=kl model.code_length=128 \
+    trainer.max_steps=400000
+```
+
+qwen2.5-coder-0.5b:
+```
+torchrun -m flowmo.train \
+    --experiment-name "flowmo_qwen2.5-coder-0.5b_pretrain" \
+    --resume-from-ckpt "results/flowmo_qwen2.5-coder-0.5b_pretrain/checkpoints/00040000.pth" \
+    model.context_dim=896 model.quantization_type=qwen2.5-coder-0.5b model.code_length=128 \
+    trainer.max_steps=400000
+```
+
+```
+torchrun --nproc-per-node=4 -m flowmo.train \
     --experiment-name "flowmo_hi_pretrain" \
     model.context_dim=56 model.codebook_size_for_entropy=14 \
-    trainer.max_steps=800000
+    trainer.max_steps=400000
 
 torchrun --nproc-per-node=8 -m flowmo.train \
     --experiment-name "flowmo_hi_posttrain" \

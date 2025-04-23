@@ -15,6 +15,7 @@ import torch
 from einops import rearrange, repeat
 from mup import MuReadout
 from torch import Tensor, nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from flowmo import lookup_free_quantize
 
@@ -546,6 +547,22 @@ class FlowMo(nn.Module):
                 num_codebooks=1,
                 token_factorization=False,
             )
+        elif config.model.quantization_type == "qwen2.5-coder-0.5b":
+            self.qwen_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-Coder-0.5B",
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            # Freeze the model parameters but keep it in train mode for gradient flow
+            for param in self.qwen_model.parameters():
+                param.requires_grad = False
+            # Get the hidden size
+            self.qwen_hidden_size = self.qwen_model.config.hidden_size
+            self.qwen_tokenizer = AutoTokenizer.from_pretrained(
+                "Qwen/Qwen2.5-Coder-0.5B",
+                trust_remote_code=True
+            )
 
         if self.config.model.enc_mup_width is not None:
             enc_width = self.config.model.enc_mup_width
@@ -666,6 +683,77 @@ class FlowMo(nn.Module):
                 + breakdown.commitment * self.config.model.commit_loss_weight
             )
             code = quantized
+        elif self.config.model.quantization_type == 'qwen2.5-coder-0.5b':
+            # Apply FIM (Fill-in-the-Middle) transformation
+            b, t, f_qwen = code.shape # f_qwen is self.qwen_hidden_size
+            span_len = int(t * 0.3)
+
+            assert(span_len > 0)
+
+            # Randomly pick the start index for the span
+            start_idx = torch.randint(0, t - span_len + 1, (1,)).item()
+
+            # print(f'start_idx: {start_idx}, span_len: {span_len}')
+
+            # Split the code tensor
+            code_pre = code[:, :start_idx, :]
+            code_mid = code[:, start_idx : start_idx + span_len, :]
+            code_suf = code[:, start_idx + span_len :, :]
+
+            # Get FIM token embeddings (assuming tokenizer and embedding layer are accessible)
+            # Ensure tokenizer and model are on the correct device
+            fim_prefix_id = self.qwen_tokenizer("<|fim_prefix|>", return_tensors="pt").input_ids[0].to(code.device)
+            fim_suffix_id = self.qwen_tokenizer("<|fim_suffix|>", return_tensors="pt").input_ids[0].to(code.device)
+            fim_middle_id = self.qwen_tokenizer("<|fim_middle|>", return_tensors="pt").input_ids[0].to(code.device)
+
+            embed_layer = self.qwen_model.get_input_embeddings()
+            fim_prefix_emb = embed_layer(fim_prefix_id).expand(b, 1, f_qwen)
+            fim_suffix_emb = embed_layer(fim_suffix_id).expand(b, 1, f_qwen)
+            fim_middle_emb = embed_layer(fim_middle_id).expand(b, 1, f_qwen)
+
+            # Construct FIM input sequence: <|fim_prefix|> <pre> <|fim_suffix|> <suf> <|fim_middle|> <mid>
+            fim_input = torch.cat([
+                fim_prefix_emb,
+                code_pre,
+                fim_suffix_emb,
+                code_suf,
+                fim_middle_emb,
+                code_mid
+            ], dim=1)
+
+            # print('fim_input.shape', fim_input.shape)
+
+            # Pass through Qwen model - no torch.no_grad() to allow gradient flow
+            outputs = self.qwen_model(
+                inputs_embeds=fim_input,
+                output_hidden_states=True,
+                return_dict=True
+            )
+
+            # Get the final layer hidden states
+            final_hidden_states = outputs.hidden_states[-1]
+            # print('final_hidden_states.shape:', final_hidden_states.shape)
+
+            # Calculate the start index of the output corresponding to the original code_mid part
+            # Lengths: prefix(1) + pre(start_idx) + suffix(1) + suf(t - start_idx - span_len)
+            output_mid_start_idx = 1 + start_idx + 1 + (t - start_idx - span_len)
+            output_mid_end_idx = output_mid_start_idx + span_len
+            # print(f'output_mid_start_idx: {output_mid_start_idx}, output_mid_end_idx: {output_mid_end_idx}')
+
+            # Extract the hidden states corresponding to the original middle part's position
+            output_mid = final_hidden_states[:, output_mid_start_idx:output_mid_end_idx, :]
+            # print('output_mid.shape', output_mid.shape)
+
+            # Create the final code tensor by replacing the middle section in the *original* projected code
+            # Clone the input 'code' to preserve gradients for non-replaced parts if necessary,
+            # though gradients will primarily flow through output_mid.
+            processed_code = code.clone()
+            # print('code.shape', processed_code.shape)
+            processed_code[:, start_idx : start_idx + span_len, :] = output_mid
+            # print('processed_code.shape', processed_code.shape)
+            # print('processed_code - code:', (processed_code - code)[0, :, 0])
+
+            quantizer_loss = torch.tensor(0.0).to(code.device)
         else:
             raise NotImplementedError
         return code, indices, quantizer_loss
@@ -750,7 +838,14 @@ class FlowMo(nn.Module):
             if code is None:
                 x = images.cuda()
                 prequantized_code = model.encode(x)[0].cuda()
-                code, _, _ = model._quantize(prequantized_code)
+                # print('prequantized_code:', prequantized_code.shape)
+                # print(prequantized_code[0])
+                if self.config.model.quantization_type != 'qwen2.5-coder-0.5b':
+                    code = prequantized_code
+                else:
+                    code, _, _ = model._quantize(prequantized_code)
+                # print('code:', code.shape)
+                # print(code[0])
 
             z = torch.randn((bs, 3, h, w)).cuda()
 
