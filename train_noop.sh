@@ -19,11 +19,14 @@ echo "working directory = "$SLURM_SUBMIT_DIR
 CONDA_BASE=$(conda info --base)
 source $CONDA_BASE/etc/profile.d/conda.sh
 conda activate FlowMo
+
 torchrun -m flowmo.train \
-    --experiment-name "flowmo_qwen2.5-coder-0.5b_pretrain" \
-    --resume-from-ckpt "results/flowmo_qwen2.5-coder-0.5b_pretrain/checkpoints/00040000.pth" \
-    model.context_dim=896 model.quantization_type=qwen2.5-coder-0.5b model.code_length=128 \
-    trainer.max_steps=400000
+    --experiment-name "flowmo_noop_pretrain" \
+    --resume-from-ckpt "results/flowmo_noop_pretrain/checkpoints/00050000.pth" \
+    model.context_dim=896 model.quantization_type=noop model.code_length=128 \
+    trainer.max_steps=100000 \
+    trainer.checkpoint_every=5000 \
+    trainer.keep_every=5000
 
 echo "Done"
 exit 0

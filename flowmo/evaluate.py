@@ -357,13 +357,14 @@ def main(args, config):
     assert eval_dir, eval_dir
     writer = SummaryWriter(eval_dir)
 
-    seed = config.global_seed * dist.get_world_size() + dist.get_rank()
+    # seed = config.global_seed * dist.get_world_size() + dist.get_rank()
+    seed = config.global_seed
     torch.manual_seed(seed)
 
     print(OmegaConf.to_yaml(config))
 
     rank = dist.get_rank()
-    print(dist.get_world_size())
+    # print(dist.get_world_size())
     print(dist.get_rank())
     print(torch.cuda.device_count())
 

@@ -9,3 +9,5 @@ __pycache__/
 *.pth
 *.csv
 *.txt
+flowmohi_logs/
+flowmolo_logs/

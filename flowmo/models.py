@@ -547,7 +547,7 @@ class FlowMo(nn.Module):
                 num_codebooks=1,
                 token_factorization=False,
             )
-        elif config.model.quantization_type == "qwen2.5-coder-0.5b":
+        elif config.model.quantization_type.startswith("qwen2.5-coder-0.5b"):
             self.qwen_model = AutoModelForCausalLM.from_pretrained(
                 "Qwen/Qwen2.5-Coder-0.5B",
                 torch_dtype=torch.bfloat16,
@@ -683,10 +683,12 @@ class FlowMo(nn.Module):
                 + breakdown.commitment * self.config.model.commit_loss_weight
             )
             code = quantized
-        elif self.config.model.quantization_type == 'qwen2.5-coder-0.5b':
+        elif self.config.model.quantization_type.startswith('qwen2.5-coder-0.5b'):
+            span_pert = float(self.config.model.quantization_type.removeprefix('qwen2.5-coder-0.5b_span_'))
+
             # Apply FIM (Fill-in-the-Middle) transformation
             b, t, f_qwen = code.shape # f_qwen is self.qwen_hidden_size
-            span_len = int(t * 0.3)
+            span_len = int(t * span_pert)
 
             assert(span_len > 0)
 
@@ -752,6 +754,7 @@ class FlowMo(nn.Module):
             processed_code[:, start_idx : start_idx + span_len, :] = output_mid
             # print('processed_code.shape', processed_code.shape)
             # print('processed_code - code:', (processed_code - code)[0, :, 0])
+            code = processed_code
 
             quantizer_loss = torch.tensor(0.0).to(code.device)
         else:

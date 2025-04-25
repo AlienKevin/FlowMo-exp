@@ -222,7 +222,11 @@ def load_state_dict(path):
 def restore_from_ckpt(model, optimizer, path):
     print("Restoring from checkpoint!", path)
     state_dict = load_state_dict(path)
-    model.load_state_dict(state_dict["model_state_dict"])
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict["model_state_dict"], strict=False)
+    if missing_keys:
+        print(f"Warning: Missing keys during state dict load: {missing_keys}")
+    if unexpected_keys:
+        print(f"Warning: Unexpected keys during state dict load: {unexpected_keys}")
 
     if "optimizer_state_dict" in state_dict:
         print("Not loading optimizer state dict. TODO: fix memory issue.")
@@ -232,9 +236,15 @@ def restore_from_ckpt(model, optimizer, path):
     return total_steps
 
 
-def cpu_state_dict(model):
-    return {k: v.cpu() for k, v in model.state_dict().items()}
-
+def cpu_state_dict(model, ignore_modules=("qwen_model",)):
+    state_dict = model.state_dict()
+    filtered_state_dict = {}
+    
+    for k, v in state_dict.items():
+        if not any(k.startswith(module) for module in ignore_modules):
+            filtered_state_dict[k] = v.cpu()
+            
+    return filtered_state_dict
 
 def get_last_checkpoint(config, logdir):
     if config.trainer.gs_checkpoint_bucket:

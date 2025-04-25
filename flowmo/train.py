@@ -117,7 +117,8 @@ def main(args, config):
     n_params = sum(p.numel() for p in model.parameters())
     print(f"n_params: {n_params}")
 
-    seed = config.global_seed * dist.get_world_size() + rank
+    # seed = config.global_seed * dist.get_world_size() + rank
+    seed = config.global_seed
     torch.manual_seed(seed)
 
     # model = DistributedDataParallel(model, find_unused_parameters=True)

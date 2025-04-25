@@ -11,7 +11,7 @@ class FewShotImageCaptioner:
     It supports zero-shot or k-shot image captioning with in-context learning.
     """
     
-    def __init__(self, model_name="flowmo_hi_qwen2.5-coder-0.5b", device="cuda"):
+    def __init__(self, model_name="flowmo_hi_qwen2.5-coder-0.5b_span_0.3", device="cuda"):
         """
         Initialize the image captioner with specified model.
         
@@ -41,7 +41,9 @@ class FewShotImageCaptioner:
             "flowmo_hi_50000": {"context_dim": 56, "patch_size": 8, "mup_width": 4, "ckpt_path": "results/flowmo_hi_pretrain/checkpoints/00050000.pth"},
             "flowmo_hi_kl": {"context_dim": 768, "quantization_type": "kl", "code_length": 128, "patch_size": 8, "mup_width": 4, "ckpt_path": "results/flowmo_hi_kl_pretrain/checkpoints/00015000.pth"},
             "flowmo_hi_noop": {"context_dim": 768, "quantization_type": "noop", "code_length": 128, "patch_size": 8, "mup_width": 4, "ckpt_path": "results/flowmo_hi_noop_pretrain/checkpoints/00060000.pth"},
-            "flowmo_hi_qwen2.5-coder-0.5b": {"context_dim": 896, "quantization_type": "qwen2.5-coder-0.5b", "code_length": 128, "patch_size": 8, "mup_width": 4, "ckpt_path": "results/flowmo_qwen2.5-coder-0.5b_pretrain/checkpoints/00090000.pth"},
+            "flowmo_hi_qwen2.5-coder-0.5b_span_0.3": {"context_dim": 896, "quantization_type": "qwen2.5-coder-0.5b_span_0.3", "code_length": 128, "patch_size": 8, "mup_width": 4, "ckpt_path": "results/flowmo_qwen2.5-coder-0.5b_span_0.3_pretrain/checkpoints/00095000.pth"},
+            "flowmo_hi_qwen2.5-coder-0.5b_span_0.6": {"context_dim": 896, "quantization_type": "qwen2.5-coder-0.5b_span_0.6", "code_length": 128, "patch_size": 8, "mup_width": 4, "ckpt_path": "results/flowmo_qwen2.5-coder-0.5b_span_0.6_pretrain/checkpoints/00095000.pth"},
+            "flowmo_hi_qwen2.5-coder-0.5b_span_0.9": {"context_dim": 896, "quantization_type": "qwen2.5-coder-0.5b_span_0.9", "code_length": 128, "patch_size": 8, "mup_width": 4, "ckpt_path": "results/flowmo_qwen2.5-coder-0.5b_span_0.9_pretrain/checkpoints/00095000.pth"},
         }
         
         model_config = zoo[self.model_name]
@@ -74,14 +76,14 @@ class FewShotImageCaptioner:
     def _load_qwen_model(self):
         """Load the Qwen language model and tokenizer."""
         self.qwen_model = AutoModelForCausalLM.from_pretrained(
-            "Qwen/Qwen2.5-coder-0.5B-instruct",
+            "Qwen/Qwen2.5-coder-0.5B",
             torch_dtype=torch.bfloat16,
             device_map=self.device,
             trust_remote_code=True,
         )
         
         self.qwen_tokenizer = AutoTokenizer.from_pretrained(
-            "Qwen/Qwen2.5-coder-0.5B-instruct",
+            "Qwen/Qwen2.5-coder-0.5B",
             trust_remote_code=True
         )
         
