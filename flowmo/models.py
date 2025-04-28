@@ -991,7 +991,7 @@ def rf_loss(config, model, batch, aux_state):
     if config.model.get("enable_repa", False) and "repa_loss" in aux:
         repa_loss = aux["repa_loss"] # Already weighted in forward pass
         aux["loss_dict"]["repa_loss"] = repa_loss
-        loss += repa_loss
+        loss = loss + repa_loss
     else:
         aux["loss_dict"]["repa_loss"] = torch.tensor(0.0, device=loss.device)
 
