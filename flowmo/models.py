@@ -993,7 +993,7 @@ def rf_loss(config, model, batch, aux_state):
         aux["loss_dict"]["repa_loss"] = repa_loss
         loss += repa_loss
     else:
-        aux["loss_dict"]["repa_loss"] = torch.tensor(0.0, device=total_loss.device)
+        aux["loss_dict"]["repa_loss"] = torch.tensor(0.0, device=loss.device)
 
     if config.opt.lpips_weight != 0.0:
         aux_loss = 0.0
