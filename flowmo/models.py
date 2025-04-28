@@ -12,6 +12,7 @@ from typing import List, Tuple
 
 import einops
 import torch
+import torch.nn.functional as F
 from einops import rearrange, repeat
 from mup import MuReadout
 from torch import Tensor, nn
@@ -420,7 +421,7 @@ class Flux(nn.Module):
     Transformer model for flow matching on sequences.
     """
 
-    def __init__(self, params: FluxParams, name="", lsg=False):
+    def __init__(self, params: FluxParams, name="", lsg=False, repa_layer_idx: int = -1):
         super().__init__()
 
         self.name = name
@@ -440,6 +441,8 @@ class Flux(nn.Module):
             )
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
+        self.repa_layer_idx = repa_layer_idx
+
         self.pe_embedder = EmbedND(
             dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim
         )
@@ -474,6 +477,7 @@ class Flux(nn.Module):
         txt: Tensor,
         txt_ids: Tensor,
         timesteps: Tensor,
+        return_img_layer_idx=-1,
     ) -> Tensor:
         b, c, h, w = img.shape
 
@@ -496,11 +500,17 @@ class Flux(nn.Module):
         pe_single = self.pe_embedder(torch.cat((txt_ids,), dim=1))
         pe_double = self.pe_embedder(torch.cat((txt_ids, img_ids), dim=1))
 
-        for block in self.double_blocks:
+        aux = {}
+
+        for i, block in enumerate(self.double_blocks):
             img, txt = block(img=img, txt=txt, pe=(pe_single, pe_double), vec=vec)
+            if i == return_img_layer_idx:
+                aux[f'img_layer_{i}'] = img
 
         img = self.final_layer_img(img, vec=vec)
-        img = rearrange(
+        txt = self.final_layer_txt(txt, vec=vec)
+
+        img_reshaped = rearrange(
             img,
             "b (gh gw) (ph pw c) -> b c (gh ph) (gw pw)",
             ph=self.patch_size,
@@ -509,8 +519,9 @@ class Flux(nn.Module):
             gw=w // self.patch_size,
         )
 
-        txt = self.final_layer_txt(txt, vec=vec)
-        return img, txt, {"final_txt": txt}
+        aux["final_txt"] = txt
+
+        return img_reshaped, txt, aux
 
 
 def get_weights_to_fix(model):
@@ -593,7 +604,34 @@ class FlowMo(nn.Module):
         decoder_params.axes_dim = [(d // 4) * width for d in decoder_params.axes_dim]
 
         self.encoder = Flux(encoder_params, name="encoder")
-        self.decoder = Flux(decoder_params, name="decoder")
+        # Note: Encoder does not need repa_layer_idx
+
+        # REPA Setup
+        self.repa_projector = None
+        if self.config.model.get('enable_repa', False): # Check if REPA is enabled
+            encoder_hidden_size = encoder_params.hidden_size
+            decoder_hidden_size = decoder_params.hidden_size
+
+            # Determine effective repa_layer_idx, default to dec_depth // 3
+            default_repa_idx = dec_depth // 3
+            effective_repa_layer_idx = self.config.model.get('repa_layer_idx', default_repa_idx)
+            if not (0 <= effective_repa_layer_idx < dec_depth):
+                 print(f"Warning: Invalid repa_layer_idx ({effective_repa_layer_idx}). Using default: {default_repa_idx}")
+                 effective_repa_layer_idx = default_repa_idx
+            self.config.model.repa_layer_idx = effective_repa_layer_idx # Store effective index back to config
+
+            # Initialize decoder with REPA layer index
+            self.decoder = Flux(decoder_params, name="decoder", repa_layer_idx=effective_repa_layer_idx)
+
+            # Always add projector if REPA is enabled
+            print(f"REPA: Adding projector from decoder intermediate ({decoder_hidden_size}) to encoder final ({encoder_hidden_size})")
+            if self.config.model.enable_mup:
+                self.repa_projector = MuReadout(decoder_hidden_size, encoder_hidden_size)
+            else:
+                self.repa_projector = nn.Linear(decoder_hidden_size, encoder_hidden_size)
+        else:
+            # REPA not enabled, initialize decoder normally
+            self.decoder = Flux(decoder_params, name="decoder")
 
     @torch.compile
     def encode(self, img):
@@ -604,7 +642,7 @@ class FlowMo(nn.Module):
             (b, self.code_length, self.encoder_context_dim), device=img.device
         )
 
-        _, code, aux = self.encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
+        _, code, aux = self.encoder(img, img_idxs, txt, txt_idxs, timesteps=None, return_img_layer_idx=self.config.model.enc_depth-1)
 
         return code, aux
 
@@ -617,7 +655,7 @@ class FlowMo(nn.Module):
             self.patch_size,
         )
         pred, _, decode_aux = self.decoder(
-            img, img_idxs, code, txt_idxs, timesteps=timesteps
+            img, img_idxs, code, txt_idxs, timesteps=timesteps, return_img_layer_idx=self.config.model.repa_layer_idx
         )
         return pred, decode_aux
 
@@ -771,6 +809,7 @@ class FlowMo(nn.Module):
         aux = {}
 
         code, encode_aux = self.encode(img)
+        aux.update(encode_aux) # Store any aux info from encoder
 
         aux["original_code"] = code
 
@@ -788,6 +827,43 @@ class FlowMo(nn.Module):
 
         v_est, decode_aux = self.decode(noised_img, code, timesteps)
         aux.update(decode_aux)
+
+        # --- REPA Loss Calculation ---
+        aux['repa_loss'] = torch.tensor(0.0, device=img.device)
+        if self.config.model.get('enable_repa', False):
+            enc_img = aux.get(f'img_layer_{self.config.model.enc_depth-1}') # Shape: [b, num_patches, enc_hidden_size]
+            repa_idx = self.config.model.get('repa_layer_idx') # Already validated in init
+            dec_intermediate_img_key = f'img_layer_{repa_idx}'
+            dec_img = aux.get(dec_intermediate_img_key) # Shape: [b, num_patches, dec_hidden_size]
+
+            if enc_img is not None and dec_img is not None:
+                # Apply projector if necessary
+                if self.repa_projector is not None:
+                    # Ensure projector is on the correct device
+                    self.repa_projector = self.repa_projector.to(dec_img.device)
+                    # print('enc_img.shape', enc_img.shape)
+                    # print('dec_img.shape', dec_img.shape)
+                    # print('self.repa_projector.weight.shape', self.repa_projector.weight.shape)
+                    dec_img = self.repa_projector(dec_img) # Now shape [b, num_patches, enc_hidden_size]
+                    # print('after dec_img.shape', dec_img.shape)
+
+                if enc_img.shape == dec_img.shape:
+                    # Normalize patch embeddings
+                    enc_img_norm = F.normalize(enc_img, p=2, dim=-1)
+                    dec_img_norm = F.normalize(dec_img, p=2, dim=-1)
+
+                    # Calculate Negative Cosine Similarity loss (averaged over batch and patches)
+                    # Note: mean_flat averages over all non-batch dimensions
+                    repa_loss = (-(enc_img_norm * dec_img_norm).sum(dim=-1)).mean()
+                    repa_loss_weight = self.config.model.get('repa_loss_weight')
+
+                    aux['repa_loss'] = repa_loss * repa_loss_weight
+                else:
+                    print(f"Warning: REPA shape mismatch after projection: {enc_img.shape} vs {dec_img.shape}")
+            else:
+                 if enc_img is None: print(f"Warning: REPA enabled but 'encoder_final_img' not found in aux.")
+                 if dec_img is None: print(f"Warning: REPA enabled but intermediate decoder layer '{dec_intermediate_img_key}' not found in aux.")
+        # --- End REPA --- 
 
         if self.config.model.posttrain_sample:
             aux["posttrain_sample"] = self.reconstruct_checkpoint(code_pre_cfg)
@@ -910,6 +986,14 @@ def rf_loss(config, model, batch, aux_state):
     aux["loss_dict"] = {}
     aux["loss_dict"]["diffusion_loss"] = loss
     aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"]
+
+    # Add REPA loss if enabled and present
+    if config.model.get("enable_repa", False) and "repa_loss" in aux:
+        repa_loss = aux["repa_loss"] # Already weighted in forward pass
+        aux["loss_dict"]["repa_loss"] = repa_loss
+        loss += repa_loss
+    else:
+        aux["loss_dict"]["repa_loss"] = torch.tensor(0.0, device=total_loss.device)
 
     if config.opt.lpips_weight != 0.0:
         aux_loss = 0.0

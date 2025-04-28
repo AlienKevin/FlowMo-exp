@@ -26,6 +26,10 @@ model:
   codebook_size_for_entropy: 9
   entropy_loss_weight: 0.0025
   commit_loss_weight: 0.000625
+  
+  enable_repa: False
+  repa_loss_weight: 0.5
+  repa_layer_idx: -1
 
   enc_depth: 8
   dec_depth: 16
