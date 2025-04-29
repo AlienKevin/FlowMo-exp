@@ -632,6 +632,15 @@ class FlowMo(nn.Module):
         else:
             # REPA not enabled, initialize decoder normally
             self.decoder = Flux(decoder_params, name="decoder")
+        
+        # CLS Setup
+        self.cls_projector = None
+        if self.config.model.get('enable_cls', False):
+            print(f"CLS: Adding projector from encoder final ({encoder_hidden_size}) to 1000 ImageNet classes")
+            if self.config.model.enable_mup:
+                self.cls_projector = MuReadout(encoder_hidden_size, 1000)
+            else:
+                self.cls_projector = nn.Linear(encoder_hidden_size, 1000)
 
     @torch.compile
     def encode(self, img):
@@ -948,6 +957,7 @@ class FlowMo(nn.Module):
 
 def rf_loss(config, model, batch, aux_state):
     x = batch["image"]
+    y = batch["label"].to(x.device)
     b = x.size(0)
 
     if config.opt.schedule == "lognormal":
@@ -986,6 +996,14 @@ def rf_loss(config, model, batch, aux_state):
     aux["loss_dict"] = {}
     aux["loss_dict"]["diffusion_loss"] = loss
     aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"]
+
+    # Add classification loss if enabled
+    if config.model.get("enable_cls", False):
+        img_emb = aux[f'img_layer_{config.model.enc_depth-1}']
+        logits = model.cls_projector(img_emb.mean(dim=1))
+        cls_loss = F.cross_entropy(logits, y)
+        aux["loss_dict"]["cls_loss"] = cls_loss
+        loss = loss + cls_loss
 
     # Add REPA loss if enabled and present
     if config.model.get("enable_repa", False) and "repa_loss" in aux:

@@ -41,6 +41,22 @@ class IndexedTarDataset(Dataset):
         self.index = sorted(self.index, key=lambda d: d["name"].split("/")[-1])
         self.id_to_handle = {}
 
+        with open('imagenet_class_index.json', 'r') as f:
+            imagenet_class_index = json.load(f)
+        with open('imagenet-simple-labels.json', 'r') as f:
+            imagenet_labels = json.load(f)
+        self.labels = {}
+
+        if self.index[0]['name'].startswith('ILSVRC2012_val_'):
+            with open('imagenet_validation_ground_truth.txt', 'r') as f:
+                for index, line in zip(self.index, f.readlines()):
+                    self.labels[index['name'].split('.')[0]] = int(line) - 1
+        else:
+            # for values, label in zip(imagenet_class_index.values(), imagenet_labels):
+            #     self.labels[values[0]] = label
+            for class_idx, values in imagenet_class_index.items():
+                self.labels[values[0]] = int(class_idx)
+
     def __len__(self):
         return len(self.index)
 
@@ -56,16 +72,17 @@ class IndexedTarDataset(Dataset):
         img_bytes = handle.read(image_info["size"])
         image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         image.load()
-        return image
+        label = self.labels[image_info["name"].split('.')[0]]
+        return image, label
 
     def preprocess_image(self, image_info):
-        image = self.get_image(image_info)
+        image, label = self.get_image(image_info)
         image = self.preprocessor(image)
         image = np.array(image)
         image = (image / 127.5 - 1.0).astype(np.float32)
-        return image
+        return image, label
 
     def __getitem__(self, i):
         example = dict()
-        example["image"] = self.preprocess_image(self.index[i])
+        example["image"], example["label"] = self.preprocess_image(self.index[i])
         return example

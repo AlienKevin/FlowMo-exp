@@ -87,12 +87,8 @@ def wrap_dataloader(dataloader):
     while True:
         for batch in dataloader:
             new_batch = {
-                k: v.permute(0, 3, 1, 2).to("cuda")
+                k: v.permute(0, 3, 1, 2).to("cuda") if k in ["image"] else v
                 for (k, v) in batch.items()
-                if k
-                in [
-                    "image",
-                ]
             }
             yield new_batch
 

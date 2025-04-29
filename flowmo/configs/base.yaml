@@ -31,6 +31,8 @@ model:
   repa_loss_weight: 0.5
   repa_layer_idx: -1
 
+  enable_cls: False
+
   enc_depth: 8
   dec_depth: 16
   enable_cfg: True
