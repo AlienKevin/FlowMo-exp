@@ -24,18 +24,22 @@ conda activate FlowMo
 MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
-code_length=256
-vocab_size=12
+code_length=512
+vocab_size=14
+patch_size=8
 
 torchrun --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_lfq_repa_${code_length}_$(( 2 ** vocab_size ))_pretrain" \
+    --experiment-name "flowmo_lfq_repa_p${patch_size}_${code_length}_$(( 2 ** vocab_size ))_pretrain" \
     model.context_dim=${vocab_size} model.codebook_size_for_entropy=$(( vocab_size / 2 )) model.quantization_type=lfq \
     model.code_length=${code_length} \
+    model.patch_size=${patch_size} \
     model.enable_repa=True \
+    model.repa_projector_dim=2048 \
+    model.repa_feature_dim=768 \
     model.repa_loss_weight=0.5 \
     model.repa_layer_idx=5 \
     trainer.max_steps=400000 \
-    trainer.checkpoint_every=5000 \
+    trainer.checkpoint_every=10000 \
     trainer.keep_every=5000
 
 echo "Done"

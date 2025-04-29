@@ -209,6 +209,19 @@ def main(args, config):
             )
         else:
             raise NotImplementedError
+    
+    if config.model.enable_repa:
+        import timm
+        encoder = torch.hub.load('facebookresearch/dinov2', f'dinov2_vitb14')
+        del encoder.head
+        patch_resolution = config.data.image_size//config.model.patch_size
+        encoder.pos_embed.data = timm.layers.pos_embed.resample_abs_pos_embed(
+            encoder.pos_embed.data, [patch_resolution, patch_resolution],
+        )
+        encoder.head = torch.nn.Identity()
+        encoder = encoder.to(device)
+        encoder.eval().requires_grad_(False).cuda()
+        aux_state["external_encoder"] = encoder
 
     running_losses = {}
 

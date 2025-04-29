@@ -17,10 +17,21 @@ from einops import rearrange, repeat
 from mup import MuReadout
 from torch import Tensor, nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from torchvision.transforms import Normalize
 
 from flowmo import lookup_free_quantize
 
 MUP_ENABLED = True
+
+IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
+
+def preprocess_raw_image(x):
+    resolution = x.shape[-1]
+    x = (x + 1) / 2.
+    x = Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)(x)
+    x = torch.nn.functional.interpolate(x, 224 * (resolution // 256), mode='bicubic')
+    return x
 
 
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:
@@ -531,6 +542,25 @@ def get_weights_to_fix(model):
                 yield name, module.weight
 
 
+def build_mlp(hidden_size, projector_dim, z_dim, mup_enable):
+    if mup_enable:
+        return nn.Sequential(
+            MuReadout(hidden_size, projector_dim),
+            nn.SiLU(),
+            MuReadout(projector_dim, projector_dim),
+            nn.SiLU(),
+            MuReadout(projector_dim, z_dim),
+        )
+    else:
+        return nn.Sequential(
+            nn.Linear(hidden_size, projector_dim),
+            nn.SiLU(),
+            nn.Linear(projector_dim, projector_dim),
+            nn.SiLU(),
+            nn.Linear(projector_dim, z_dim),
+        )
+
+
 class FlowMo(nn.Module):
     def __init__(self, width, config):
         super().__init__()
@@ -609,7 +639,8 @@ class FlowMo(nn.Module):
         # REPA Setup
         self.repa_projector = None
         if self.config.model.get('enable_repa', False): # Check if REPA is enabled
-            encoder_hidden_size = encoder_params.hidden_size
+            repa_feature_dim = self.config.model.get('repa_feature_dim')
+
             decoder_hidden_size = decoder_params.hidden_size
 
             # Determine effective repa_layer_idx, default to dec_depth // 3
@@ -624,11 +655,9 @@ class FlowMo(nn.Module):
             self.decoder = Flux(decoder_params, name="decoder", repa_layer_idx=effective_repa_layer_idx)
 
             # Always add projector if REPA is enabled
-            print(f"REPA: Adding projector from decoder intermediate ({decoder_hidden_size}) to encoder final ({encoder_hidden_size})")
-            if self.config.model.enable_mup:
-                self.repa_projector = MuReadout(decoder_hidden_size, encoder_hidden_size)
-            else:
-                self.repa_projector = nn.Linear(decoder_hidden_size, encoder_hidden_size)
+            # Project from decoder intermediate to feature dimension
+            print(f"REPA: Adding projector from decoder intermediate ({decoder_hidden_size}) to feature dim ({repa_feature_dim})")
+            self.repa_projector = build_mlp(decoder_hidden_size, config.model.repa_projector_dim, repa_feature_dim, self.config.model.get('enable_mup', MUP_ENABLED))
         else:
             # REPA not enabled, initialize decoder normally
             self.decoder = Flux(decoder_params, name="decoder")
@@ -636,11 +665,11 @@ class FlowMo(nn.Module):
         # CLS Setup
         self.cls_projector = None
         if self.config.model.get('enable_cls', False):
-            print(f"CLS: Adding projector from encoder final ({encoder_hidden_size}) to 1000 ImageNet classes")
+            print(f"CLS: Adding projector from encoder final ({encoder_params.hidden_size}) to 1000 ImageNet classes")
             if self.config.model.enable_mup:
-                self.cls_projector = MuReadout(encoder_hidden_size, 1000)
+                self.cls_projector = MuReadout(encoder_params.hidden_size, 1000)
             else:
-                self.cls_projector = nn.Linear(encoder_hidden_size, 1000)
+                self.cls_projector = nn.Linear(encoder_params.hidden_size, 1000)
 
     @torch.compile
     def encode(self, img):
@@ -813,6 +842,7 @@ class FlowMo(nn.Module):
         img,
         noised_img,
         timesteps,
+        external_enc_features: Tensor | None = None,
         enable_cfg=True,
     ):
         aux = {}
@@ -824,55 +854,56 @@ class FlowMo(nn.Module):
 
         b, t, f = code.shape
 
+        # Quantize the code
         code, _, aux["quantizer_loss"] = self._quantize(code)
 
+        # Prepare code for decoder (add mask)
         mask = torch.ones_like(code[..., :1])
         code = torch.concatenate([code, mask], axis=-1)
         code_pre_cfg = code
 
+        # Apply CFG dropout if enabled
         if self.config.model.enable_cfg and enable_cfg:
             cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None]
             code = code * cfg_mask
 
+        # Run the decoder
         v_est, decode_aux = self.decode(noised_img, code, timesteps)
         aux.update(decode_aux)
 
         # --- REPA Loss Calculation ---
         aux['repa_loss'] = torch.tensor(0.0, device=img.device)
+        # Check if REPA is enabled AND external features were provided
         if self.config.model.get('enable_repa', False):
-            enc_img = aux.get(f'img_layer_{self.config.model.enc_depth-1}') # Shape: [b, num_patches, enc_hidden_size]
+            enc_img = external_enc_features
+
             repa_idx = self.config.model.get('repa_layer_idx') # Already validated in init
             dec_intermediate_img_key = f'img_layer_{repa_idx}'
             dec_img = aux.get(dec_intermediate_img_key) # Shape: [b, num_patches, dec_hidden_size]
 
             if enc_img is not None and dec_img is not None:
-                # Apply projector if necessary
                 if self.repa_projector is not None:
-                    # Ensure projector is on the correct device
                     self.repa_projector = self.repa_projector.to(dec_img.device)
-                    # print('enc_img.shape', enc_img.shape)
-                    # print('dec_img.shape', dec_img.shape)
-                    # print('self.repa_projector.weight.shape', self.repa_projector.weight.shape)
-                    dec_img = self.repa_projector(dec_img) # Now shape [b, num_patches, enc_hidden_size]
-                    # print('after dec_img.shape', dec_img.shape)
+                    dec_img = self.repa_projector(dec_img) # Now shape [b, num_patches, repa_feature_dim]
 
                 if enc_img.shape == dec_img.shape:
                     # Normalize patch embeddings
                     enc_img_norm = F.normalize(enc_img, p=2, dim=-1)
                     dec_img_norm = F.normalize(dec_img, p=2, dim=-1)
 
-                    # Calculate Negative Cosine Similarity loss (averaged over batch and patches)
-                    # Note: mean_flat averages over all non-batch dimensions
+                    # Calculate Negative Cosine Similarity loss
                     repa_loss = (-(enc_img_norm * dec_img_norm).sum(dim=-1)).mean()
                     repa_loss_weight = self.config.model.get('repa_loss_weight')
 
                     aux['repa_loss'] = repa_loss * repa_loss_weight
                 else:
-                    print(f"Warning: REPA shape mismatch after projection: {enc_img.shape} vs {dec_img.shape}")
+                    # This warning would trigger if projection didn't result in matching shapes
+                    print(f"Warning: REPA shape mismatch after projection: External {enc_img.shape} vs Decoder {dec_img.shape}")
             else:
-                 if enc_img is None: print(f"Warning: REPA enabled but 'encoder_final_img' not found in aux.")
+                 # Warnings if expected activations are missing
+                 if enc_img is None: print(f"Warning: REPA enabled but external_enc_features were None.") # Should not happen due to outer check
                  if dec_img is None: print(f"Warning: REPA enabled but intermediate decoder layer '{dec_intermediate_img_key}' not found in aux.")
-        # --- End REPA --- 
+        # --- End REPA ---
 
         if self.config.model.posttrain_sample:
             aux["posttrain_sample"] = self.reconstruct_checkpoint(code_pre_cfg)
@@ -981,10 +1012,26 @@ def rf_loss(config, model, batch, aux_state):
 
     zt, t = zt.to(x.dtype), t.to(x.dtype)
 
+    # --- Compute External Features (if REPA enabled) ---
+    external_features = None
+    if config.model.get("enable_repa", False):
+        external_encoder = aux_state.get('external_encoder')
+
+        with torch.no_grad(): # Don't need gradients through external encoder
+            x_preprocessed = preprocess_raw_image(x)
+            features_output = external_encoder.forward_features(x_preprocessed)
+            external_features = features_output['x_norm_patchtokens']
+            expected_dim = config.model.get('repa_feature_dim')
+            if expected_dim and external_features.shape[-1] != expected_dim:
+                print(f"Warning: External features dim mismatch. Expected {expected_dim}, Got {external_features.shape[-1]}")
+                external_features = None # Nullify if dim is wrong
+
+
     vtheta, aux = model(
-        img=x,
-        noised_img=zt,
-        timesteps=t.reshape((b,)),
+        img=x,                  # Original image (potentially used by internal encoder if run)
+        noised_img=zt,          # Noised image for diffusion step
+        timesteps=t.reshape((b,)), # Timestep for diffusion
+        external_enc_features=external_features # Pass computed external features
     )
 
     diff = z1 - vtheta - x

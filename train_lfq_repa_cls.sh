@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --time=2880
 #SBATCH --cpus-per-task=16
-#SBATCH --job-name=lfq_repa
+#SBATCH --job-name=cls_repa_lfq
 #SBATCH --output=%j_output.txt
 #SBATCH --error=%j_error.txt
 
@@ -28,7 +28,7 @@ code_length=512
 vocab_size=12
 
 torchrun --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_lfq_repa_${code_length}_$(( 2 ** vocab_size ))_pretrain" \
+    --experiment-name "flowmo_lfq_repa_cls_${code_length}_$(( 2 ** vocab_size ))_pretrain" \
     model.context_dim=${vocab_size} model.codebook_size_for_entropy=$(( vocab_size / 2 )) model.quantization_type=lfq \
     model.code_length=${code_length} \
     model.enable_repa=True \
