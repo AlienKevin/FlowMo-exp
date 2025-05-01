@@ -30,8 +30,8 @@ mup_width=4
 batch_size=16
 
 torchrun --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_qwen3-0.6b_pretrain_code_length_${code_length}_batch_size_${batch_size}" \
-    model.context_dim=768 model.quantization_type="qwen3-0.6b-base" model.code_length=${code_length} \
+    --experiment-name "flowmo_lqae_pretrain_code_length_${code_length}_batch_size_${batch_size}" \
+    model.context_dim=768 model.quantization_type="lqae" model.code_length=${code_length} \
     model.patch_size=${patch_size} \
     model.mup_width=${mup_width} \
     data.batch_size=${batch_size}\
