@@ -589,7 +589,7 @@ class FlowMo(nn.Module):
                 num_codebooks=1,
                 token_factorization=False,
             )
-        elif config.model.quantization_type == "qwen3-0.6b-base":
+        elif config.model.quantization_type == "lqae":
             # Load with unsloth
             self.qwen_model, self.qwen_tokenizer = FastLanguageModel.from_pretrained(
                 model_name = "Qwen/Qwen3-0.6B-Base",
@@ -606,7 +606,32 @@ class FlowMo(nn.Module):
             # Explicitly set dtype for projectors to match model/desired precision
             self.qwen_in_projector = nn.Linear(self.encoder_context_dim, self.qwen_hidden_size, dtype=torch.bfloat16)
             self.qwen_out_projector = nn.Linear(self.qwen_hidden_size, self.context_dim, dtype=torch.bfloat16)
+        elif config.model.quantization_type == "larp":
+            self.quantizer = lookup_free_quantize.LFQ(
+                codebook_size=2**self.config.model.codebook_size_for_entropy,
+                dim=self.config.model.codebook_size_for_entropy,
+                num_codebooks=1,
+                token_factorization=False,
+            )
 
+            # Load with unsloth
+            self.qwen_model, self.qwen_tokenizer = FastLanguageModel.from_pretrained(
+                model_name = "Qwen/Qwen3-0.6B-Base",
+                max_seq_length = 32768,
+                dtype = torch.bfloat16,
+                load_in_4bit = True,
+                trust_remote_code = True,
+            )
+            # Freeze the model parameters but keep it in train mode for gradient flow
+            for param in self.qwen_model.parameters():
+                param.requires_grad = False
+            # Get the hidden size
+            self.qwen_hidden_size = self.qwen_model.config.hidden_size
+            # Initialize trainable LFQ embedding
+            self.lfq_embedding = nn.Embedding(
+                num_embeddings=2**self.config.model.codebook_size_for_entropy,
+                embedding_dim=self.qwen_hidden_size
+            )
         elif config.model.quantization_type.startswith("qwen2.5-coder-0.5b"):
             self.qwen_model = AutoModelForCausalLM.from_pretrained(
                 "Qwen/Qwen2.5-Coder-0.5B",
@@ -733,7 +758,7 @@ class FlowMo(nn.Module):
         )
 
     @torch.compile
-    def _quantize(self, code):
+    def _quantize(self, code, caption):
         """
         Args:
             code: [b codelength context dim]
@@ -783,11 +808,118 @@ class FlowMo(nn.Module):
                 entropy_aux_loss * self.config.model.entropy_loss_weight
                 + breakdown.commitment * self.config.model.commit_loss_weight
             )
+            # Calculate codebook usage
+            codebook_size = 2**self.config.model.codebook_size_for_entropy
+            unique_indices = torch.unique(indices)
+            codebook_usage = len(unique_indices) / codebook_size
+
             code = quantized
             losses = {
                 'quantizer_loss': quantizer_loss,
+                'codebook_usage': codebook_usage,
             }
-        elif self.config.model.quantization_type == 'qwen3-0.6b-base':
+        elif self.config.model.quantization_type == 'larp':
+            code_orig_dtype = code.dtype
+            b, t, f = code.shape
+            assert f % self.config.model.codebook_size_for_entropy == 0, f
+
+            # --- LFQ Quantization ---
+            code_lfq_input = einops.rearrange(
+                code,
+                "b t (fg fh) -> b fg (t fh)",
+                fg=self.config.model.codebook_size_for_entropy,
+            )
+            (quantized, entropy_aux_loss, indices), breakdown = self.quantizer(
+                code_lfq_input, return_loss_breakdown=True
+            )
+            # 'indices' shape: flattened([b, num_codebooks (1), t * fh])
+            # 'quantized' shape: [b, fg, t * fh]
+
+            quantizer_loss = (
+                entropy_aux_loss * self.config.model.entropy_loss_weight
+                + breakdown.commitment * self.config.model.commit_loss_weight
+            )
+
+            # Calculate codebook usage
+            codebook_size = 2**self.config.model.codebook_size_for_entropy
+            unique_indices = torch.unique(indices)
+            codebook_usage = len(unique_indices) / codebook_size
+
+            # Reshape indices for embedding lookup: [b, t * fh] -> [b, t, fh]
+            fh = f // self.config.model.codebook_size_for_entropy
+            indices_reshaped = einops.rearrange(indices, '(b t fh) -> b t fh', t=t, fh=fh)
+            # Treat each fh component as a separate token
+            # Embed each index: [b, t, fh] -> [b, t, fh, hidden_size]
+            lfq_embeds_fh = self.lfq_embedding(indices_reshaped)
+            # Rearrange to [b, t * fh, hidden_size]
+            lfq_embeds = einops.rearrange(lfq_embeds_fh, 'b t fh h -> b (t fh) h')
+
+            lfq_embeds = lfq_embeds.to(self.qwen_model.dtype) # Match Qwen dtype
+            effective_lfq_len = lfq_embeds.shape[1] # This is t * fh
+
+            # --- Caption Processing ---
+            if caption is None:
+                caption = [""] * b # Use empty captions if none provided
+
+            # Tokenize captions with padding
+            tokenizer_output = self.qwen_tokenizer(
+                caption,
+                return_tensors="pt",
+                padding="longest", # Pad to the longest sequence in the batch
+                truncation=True,   # Truncate if longer than max length
+                max_length=self.qwen_tokenizer.model_max_length # Use model's max length
+            )
+            caption_ids = tokenizer_output.input_ids.to(code.device) # [b, caption_len]
+            attention_mask = tokenizer_output.attention_mask.to(code.device) # [b, caption_len]
+
+            # Get caption embeddings
+            caption_embeds = self.qwen_model.get_input_embeddings()(caption_ids) # [b, caption_len, hidden_size]
+            caption_embeds = caption_embeds.to(self.qwen_model.dtype) # Match Qwen dtype
+
+            # --- Combine and Pass through Qwen ---
+            combined_embeds = torch.cat([lfq_embeds, caption_embeds], dim=1) # [b, effective_lfq_len + caption_len, hidden_size]
+            # Create combined attention mask (LFQ tokens always attended, caption tokens masked)
+            lfq_mask = torch.ones_like(lfq_embeds[..., 0], dtype=torch.long) # [b, effective_lfq_len]
+            combined_attention_mask = torch.cat([lfq_mask, attention_mask], dim=1) # [b, effective_lfq_len + caption_len]
+
+            outputs = self.qwen_model(
+                inputs_embeds=combined_embeds,
+                attention_mask=combined_attention_mask, # Provide the combined mask
+                output_hidden_states=False, # Don't need hidden states here
+                return_dict=True
+            )
+
+            # --- Calculate Qwen CE Loss (on Captions Only) ---
+            qwen_ce_loss = torch.tensor(0.0, device=code.device, dtype=torch.float32)
+            if self.config.model.get("qwen_ce_loss_weight", 0.0) > 0:
+                logits = outputs.logits # Shape: [b, effective_lfq_len + caption_len, vocab_size]
+
+                # Slice logits and targets to only include caption tokens
+                # Start slicing after the LFQ tokens
+                caption_logits = logits[:, effective_lfq_len:, :] # [b, caption_len, vocab_size]
+                vocab_size = caption_logits.size(-1)
+
+                # Shift logits and labels for next token prediction task
+                # Logits for position i predict token i+1
+                shift_logits = caption_logits[:, :-1, :].contiguous() # [b, caption_len - 1, vocab_size]
+                shift_labels = caption_ids[:, 1:].contiguous()       # [b, caption_len - 1]
+
+                # Flatten the tokens
+                loss_fct = nn.CrossEntropyLoss(ignore_index=self.qwen_tokenizer.pad_token_id) # Ignore padding
+                qwen_ce_loss = loss_fct(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
+                qwen_ce_loss = qwen_ce_loss * self.config.model.qwen_ce_loss_weight
+
+            # --- Prepare Final Output ---
+            # The 'code' returned for the decoder is the original LFQ quantized output
+            quantized_final = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
+            code = quantized_final.to(code_orig_dtype) # Back to original dtype
+
+            losses = {
+                'quantizer_loss': quantizer_loss,
+                'qwen_ce_loss': qwen_ce_loss,
+                'codebook_usage': codebook_usage,
+            }
+        elif self.config.model.quantization_type == 'lqae':
             code_orig_dtype = code.dtype
             b, t, _ = code.shape
             qwen_input_embeds = self.qwen_in_projector(code) # Project image features
@@ -934,6 +1066,7 @@ class FlowMo(nn.Module):
         noised_img,
         timesteps,
         external_enc_features: Tensor | None = None,
+        caption: list[str] | None = None,
         enable_cfg=True,
     ):
         aux = {}
@@ -946,7 +1079,7 @@ class FlowMo(nn.Module):
         b, t, f = code.shape
 
         # Quantize the code
-        code, _, aux_losses = self._quantize(code)
+        code, _, aux_losses = self._quantize(code, caption)
         aux.update(aux_losses)
 
         # Prepare code for decoder (add mask)
@@ -1081,6 +1214,7 @@ class FlowMo(nn.Module):
 def rf_loss(config, model, batch, aux_state):
     x = batch["image"]
     y = batch["label"].to(x.device)
+    caption = batch["caption"]
     b = x.size(0)
 
     if config.opt.schedule == "lognormal":
@@ -1123,7 +1257,8 @@ def rf_loss(config, model, batch, aux_state):
         img=x,                  # Original image (potentially used by internal encoder if run)
         noised_img=zt,          # Noised image for diffusion step
         timesteps=t.reshape((b,)), # Timestep for diffusion
-        external_enc_features=external_features # Pass computed external features
+        external_enc_features=external_features, # Pass computed external features
+        caption=caption,
     )
 
     diff = z1 - vtheta - x

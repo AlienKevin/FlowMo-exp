@@ -62,7 +62,7 @@ class IndexedTarDataset(Dataset):
         captions_df = pd.read_csv('imagenet_gemma3_12b.tsv', sep='\t', header=None, names=['file_name', 'caption'])
         for _, row in captions_df.iterrows():
             file_name, caption = row['file_name'], row['caption']
-            self.captions[file_name.split('.')[0]] = caption
+            self.captions[file_name] = caption
 
     def __len__(self):
         return len(self.index)
@@ -80,21 +80,21 @@ class IndexedTarDataset(Dataset):
         image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         image.load()
         label = self.labels[image_info["name"].split('.')[0]]
-        # if '.tar/' in image_info["name"]:
-        #     caption = self.captions[image_info["name"].split('/')[-1]]
-        # else:
-        #     caption = self.captions[image_info["name"]]
-        # return image, label, caption
+        if '.tar/' in image_info["name"]:
+            caption = self.captions[image_info["name"].split('/')[-1]]
+        else:
+            caption = self.captions[image_info["name"]]
+        return image, label, caption
         return image, label
 
     def preprocess_image(self, image_info):
-        image, label = self.get_image(image_info)
+        image, label, caption = self.get_image(image_info)
         image = self.preprocessor(image)
         image = np.array(image)
         image = (image / 127.5 - 1.0).astype(np.float32)
-        return image, label
+        return image, label, caption
 
     def __getitem__(self, i):
         example = dict()
-        example["image"], example["label"] = self.preprocess_image(self.index[i])
+        example["image"], example["label"], example["caption"] = self.preprocess_image(self.index[i])
         return example
