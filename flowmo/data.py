@@ -6,6 +6,7 @@ import torch
 import torchvision.transforms as T
 from PIL import Image
 from torch.utils.data import Dataset
+import pandas as pd
 
 
 class IndexedTarDataset(Dataset):
@@ -56,6 +57,12 @@ class IndexedTarDataset(Dataset):
             #     self.labels[values[0]] = label
             for class_idx, values in imagenet_class_index.items():
                 self.labels[values[0]] = int(class_idx)
+        
+        self.captions = {}
+        captions_df = pd.read_csv('imagenet_gemma3_12b.tsv', sep='\t', header=None, names=['file_name', 'caption'])
+        for _, row in captions_df.iterrows():
+            file_name, caption = row['file_name'], row['caption']
+            self.captions[file_name.split('.')[0]] = caption
 
     def __len__(self):
         return len(self.index)
@@ -73,6 +80,11 @@ class IndexedTarDataset(Dataset):
         image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         image.load()
         label = self.labels[image_info["name"].split('.')[0]]
+        # if '.tar/' in image_info["name"]:
+        #     caption = self.captions[image_info["name"].split('/')[-1]]
+        # else:
+        #     caption = self.captions[image_info["name"]]
+        # return image, label, caption
         return image, label
 
     def preprocess_image(self, image_info):

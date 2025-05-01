@@ -588,6 +588,25 @@ class FlowMo(nn.Module):
                 num_codebooks=1,
                 token_factorization=False,
             )
+        elif config.model.quantization_type == "qwen3-0.6b-base":
+            self.qwen_model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen3-0.6B-Base",
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            # Freeze the model parameters but keep it in train mode for gradient flow
+            for param in self.qwen_model.parameters():
+                param.requires_grad = False
+            # Get the hidden size
+            self.qwen_hidden_size = self.qwen_model.config.hidden_size
+            self.qwen_tokenizer = AutoTokenizer.from_pretrained(
+                "Qwen/Qwen3-0.6B-Base",
+                trust_remote_code=True
+            )
+            self.qwen_in_projector = nn.Linear(self.encoder_context_dim, self.qwen_hidden_size)
+            self.qwen_out_projector = nn.Linear(self.qwen_hidden_size, self.context_dim)
+            
         elif config.model.quantization_type.startswith("qwen2.5-coder-0.5b"):
             self.qwen_model = AutoModelForCausalLM.from_pretrained(
                 "Qwen/Qwen2.5-Coder-0.5B",
@@ -727,6 +746,9 @@ class FlowMo(nn.Module):
         if self.config.model.quantization_type == "noop":
             quantized = code
             quantizer_loss = torch.tensor(0.0).to(code.device)
+            losses = {
+                'quantizer_loss': quantizer_loss,
+            }
         elif self.config.model.quantization_type == "kl":
             # colocating features of same token before split is maybe slightly
             # better?
@@ -740,6 +762,9 @@ class FlowMo(nn.Module):
                 t=t,
             )
             quantizer_loss = _kl_diagonal_gaussian(mean, logvar)
+            losses = {
+                'quantizer_loss': quantizer_loss,
+            }
         elif self.config.model.quantization_type == "lfq":
             assert f % self.config.model.codebook_size_for_entropy == 0, f
             code = einops.rearrange(
@@ -759,6 +784,68 @@ class FlowMo(nn.Module):
                 + breakdown.commitment * self.config.model.commit_loss_weight
             )
             code = quantized
+            losses = {
+                'quantizer_loss': quantizer_loss,
+            }
+        elif self.config.model.quantization_type == 'qwen3-0.6b-base':
+            code_orig_dtype = code.dtype
+            b, t, _ = code.shape
+            qwen_input_embeds = self.qwen_in_projector(code) # Project image features
+
+            # --- Actual Quantization Step ---
+            with torch.no_grad(): # Quantization lookup should not require gradients here
+                embed_matrix = self.qwen_model.get_input_embeddings().weight.float() # (vocab_size, hidden_size)
+                vocab_size = embed_matrix.shape[0]
+                qwen_input_flat = qwen_input_embeds.view(-1, self.qwen_hidden_size).float()
+
+                # L2 distance calculation
+                input_sq = torch.sum(qwen_input_flat**2, dim=1, keepdim=True)
+                matrix_sq = torch.sum(embed_matrix**2, dim=1).unsqueeze(0)
+                dot_prod = torch.matmul(qwen_input_flat, embed_matrix.t())
+                distances_sq = input_sq - 2 * dot_prod + matrix_sq
+
+                quantized_ids = torch.argmin(distances_sq, dim=-1) # (b*t)
+                codebook_usage = len(torch.unique(quantized_ids)) / vocab_size
+
+            # Get the embeddings corresponding to the quantized IDs
+            quantized_embeds = self.qwen_model.get_input_embeddings()(quantized_ids.view(b, t))
+            quantized_embeds = quantized_embeds.to(code_orig_dtype) # Match original dtype for model input
+            indices = quantized_ids.view(b, t) # Keep track of indices
+            # ---------------------------------
+
+            ste_quantized_embeds = qwen_input_embeds + (quantized_embeds - qwen_input_embeds).detach()
+
+            # Pass the *STE-modified quantized* embeddings through Qwen
+            outputs = self.qwen_model(
+                inputs_embeds=ste_quantized_embeds, # Use STE output here
+                output_hidden_states=True,
+                return_dict=True
+            )
+
+            # Use the last hidden state (from quantized input) for the decoder
+            processed_code = outputs.hidden_states[-1]
+            processed_code = self.qwen_out_projector(processed_code).to(code_orig_dtype) # Project back
+
+            # Calculate Qwen Cross-Entropy Loss (Logits vs Quantized IDs)
+            qwen_ce_loss = torch.tensor(0.0, device=code.device, dtype=torch.float32)
+            if self.config.model.get("qwen_ce_loss_weight") > 0:
+                logits = outputs.logits # Shape: (b, t, vocab_size)
+                qwen_ce_loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)), # (b*t, vocab_size)
+                    quantized_ids, # Target: the IDs we quantized to
+                    reduction='mean'
+                ).float()
+
+            commit_loss_weight = self.config.model.get("commit_loss_weight")
+            e_latent_loss = F.mse_loss(quantized_embeds.detach(), qwen_input_embeds)
+            quantizer_loss = commit_loss_weight * e_latent_loss
+
+            code = processed_code # The final output for the decoder is the processed quantized code
+            losses = {
+                'quantizer_loss': quantizer_loss,
+                'qwen_ce_loss': qwen_ce_loss,
+                'codebook_usage': codebook_usage
+            }
         elif self.config.model.quantization_type.startswith('qwen2.5-coder-0.5b'):
             span_pert = float(self.config.model.quantization_type.removeprefix('qwen2.5-coder-0.5b_span_'))
 
@@ -833,9 +920,13 @@ class FlowMo(nn.Module):
             code = processed_code
 
             quantizer_loss = torch.tensor(0.0).to(code.device)
+            losses = {
+                'quantizer_loss': quantizer_loss,
+            }
         else:
             raise NotImplementedError
-        return code, indices, quantizer_loss
+
+        return code, indices, losses
 
     def forward(
         self,
@@ -855,7 +946,8 @@ class FlowMo(nn.Module):
         b, t, f = code.shape
 
         # Quantize the code
-        code, _, aux["quantizer_loss"] = self._quantize(code)
+        code, _, aux_losses = self._quantize(code)
+        aux.update(aux_losses)
 
         # Prepare code for decoder (add mask)
         mask = torch.ones_like(code[..., :1])
@@ -1041,24 +1133,33 @@ def rf_loss(config, model, batch, aux_state):
     loss = loss.mean()
 
     aux["loss_dict"] = {}
-    aux["loss_dict"]["diffusion_loss"] = loss
-    aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"]
+    aux["loss_dict"]["diffusion_loss"] = loss.detach().item()
+    aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"].detach().item()
+
+    if "qwen_ce_loss" in aux:
+        qwen_ce_weight = config.model.get("qwen_ce_loss_weight")
+        ce_loss = aux["qwen_ce_loss"] * qwen_ce_weight
+        aux["loss_dict"]["qwen_ce_loss"] = ce_loss.detach().item()
+        loss = loss + ce_loss
+    
+    if "codebook_usage" in aux:
+        aux["loss_dict"]["codebook_usage"] = aux["codebook_usage"]
 
     # Add classification loss if enabled
     if config.model.get("enable_cls", False):
         img_emb = aux[f'img_layer_{config.model.enc_depth-1}']
         logits = model.cls_projector(img_emb.mean(dim=1))
         cls_loss = F.cross_entropy(logits, y)
-        aux["loss_dict"]["cls_loss"] = cls_loss
+        aux["loss_dict"]["cls_loss"] = cls_loss.detach().item()
         loss = loss + cls_loss
 
     # Add REPA loss if enabled and present
     if config.model.get("enable_repa", False) and "repa_loss" in aux:
         repa_loss = aux["repa_loss"] # Already weighted in forward pass
-        aux["loss_dict"]["repa_loss"] = repa_loss
+        aux["loss_dict"]["repa_loss"] = repa_loss.detach().item()
         loss = loss + repa_loss
     else:
-        aux["loss_dict"]["repa_loss"] = torch.tensor(0.0, device=loss.device)
+        aux["loss_dict"]["repa_loss"] = 0.0
 
     if config.opt.lpips_weight != 0.0:
         aux_loss = 0.0
@@ -1067,12 +1168,12 @@ def rf_loss(config, model, batch, aux_state):
 
         lpips_dist = aux_state["lpips_model"](x, x_pred)
         lpips_dist = (config.opt.lpips_weight * lpips_dist).mean() + aux_loss
-        aux["loss_dict"]["lpips_loss"] = lpips_dist
+        aux["loss_dict"]["lpips_loss"] = lpips_dist.detach().item()
     else:
         lpips_dist = 0.0
 
     loss = loss + aux["quantizer_loss"] + lpips_dist
-    aux["loss_dict"]["total_loss"] = loss
+    aux["loss_dict"]["total_loss"] = loss.detach().item()
     return loss, aux
 
 

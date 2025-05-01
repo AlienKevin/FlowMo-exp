@@ -282,7 +282,7 @@ def main(args, config):
 
             steps_per_sec = config.trainer.log_every / (toc - tic)
             running_losses = {
-                k: (l / config.trainer.log_every).item()
+                k: (l / config.trainer.log_every)
                 for (k, l) in running_losses.items()
             }
             reserved_gb = torch.cuda.max_memory_reserved() / 1e9
