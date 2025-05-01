@@ -25,12 +25,12 @@ MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
 patch_size=8
-code_length=1024
+code_length=512
 mup_width=4
-batch_size=64
+batch_size=16
 
 torchrun --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_qwen3-0.6b_pretrain" \
+    --experiment-name "flowmo_qwen3-0.6b_pretrain_code_length_${code_length}_batch_size_${batch_size}" \
     model.context_dim=768 model.quantization_type="qwen3-0.6b-base" model.code_length=${code_length} \
     model.patch_size=${patch_size} \
     model.mup_width=${mup_width} \

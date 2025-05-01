@@ -10,6 +10,7 @@ import math
 from dataclasses import dataclass
 from typing import List, Tuple
 
+from unsloth import FastLanguageModel
 import einops
 import torch
 import torch.nn.functional as F
@@ -589,24 +590,23 @@ class FlowMo(nn.Module):
                 token_factorization=False,
             )
         elif config.model.quantization_type == "qwen3-0.6b-base":
-            self.qwen_model = AutoModelForCausalLM.from_pretrained(
-                "Qwen/Qwen3-0.6B-Base",
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-                trust_remote_code=True,
+            # Load with unsloth
+            self.qwen_model, self.qwen_tokenizer = FastLanguageModel.from_pretrained(
+                model_name = "Qwen/Qwen3-0.6B-Base",
+                max_seq_length = 32768, # Qwen3 0.6B context length
+                dtype = torch.bfloat16,
+                load_in_4bit = True,
+                trust_remote_code = True,
             )
             # Freeze the model parameters but keep it in train mode for gradient flow
             for param in self.qwen_model.parameters():
                 param.requires_grad = False
             # Get the hidden size
             self.qwen_hidden_size = self.qwen_model.config.hidden_size
-            self.qwen_tokenizer = AutoTokenizer.from_pretrained(
-                "Qwen/Qwen3-0.6B-Base",
-                trust_remote_code=True
-            )
-            self.qwen_in_projector = nn.Linear(self.encoder_context_dim, self.qwen_hidden_size)
-            self.qwen_out_projector = nn.Linear(self.qwen_hidden_size, self.context_dim)
-            
+            # Explicitly set dtype for projectors to match model/desired precision
+            self.qwen_in_projector = nn.Linear(self.encoder_context_dim, self.qwen_hidden_size, dtype=torch.bfloat16)
+            self.qwen_out_projector = nn.Linear(self.qwen_hidden_size, self.context_dim, dtype=torch.bfloat16)
+
         elif config.model.quantization_type.startswith("qwen2.5-coder-0.5b"):
             self.qwen_model = AutoModelForCausalLM.from_pretrained(
                 "Qwen/Qwen2.5-Coder-0.5B",

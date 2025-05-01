@@ -13,10 +13,11 @@ cd FlowMo
 ```
 
 ## Install the requirements
+Set to python=3.12 and torch==2.5.1 to accommodate unsloth
 ```
-conda create -n FlowMo python=3.13.2 pip
+conda create -n FlowMo python=3.12 pip
 conda activate FlowMo
-pip install torch==2.6.0 torchvision --index-url https://download.pytorch.org/whl/cu124
+pip install torch==2.5.1 torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 Note: The torch and cuda version above were what we used to produce the paper results. But we've tested torch 2.4, 2.5, 2.6 and attained similar performance with all.
