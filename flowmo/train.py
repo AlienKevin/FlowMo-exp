@@ -50,20 +50,20 @@ def train_step(config, model, batch, optimizer, aux_state):
     total_loss = 0.0
     assert len(batch_chunks) == config.opt.n_grad_acc
     for i, batch_chunk in enumerate(batch_chunks):
-        # with (
-        #     contextlib.nullcontext()
-        #     if i == config.opt.n_grad_acc - 1
-        #     else model.no_sync()
-        # ):
-        with torch.autocast(
-            "cuda",
-            dtype=dtype,
+        with (
+            contextlib.nullcontext()
+            if i == config.opt.n_grad_acc - 1
+            else model.no_sync()
         ):
-            loss, aux = models.rf_loss(config, model, batch_chunk, aux_state)
-            loss = loss / config.opt.n_grad_acc
+            with torch.autocast(
+                "cuda",
+                dtype=dtype,
+            ):
+                loss, aux = models.rf_loss(config, model, batch_chunk, aux_state)
+                loss = loss / config.opt.n_grad_acc
 
-        loss.backward()
-        total_loss += loss.detach()
+            loss.backward()
+            total_loss += loss.detach()
 
     if config.opt.log_norms:
         original_grad_norm = _get_norm(model, getter=lambda p: p.grad)
@@ -75,20 +75,15 @@ def train_step(config, model, batch, optimizer, aux_state):
 
 
 def main(args, config):
-    import torch._dynamo
-    torch._dynamo.config.suppress_errors = True
-
     config = train_utils.restore_config(config)
     print(torch.__version__)
     models.MUP_ENABLED = config.model.enable_mup
 
-    # train_utils.soft_init()
+    train_utils.soft_init()
 
-    # rank = dist.get_rank()
-    # print(rank)
-    # dist.barrier()
-
-    rank = 0
+    rank = dist.get_rank()
+    print(rank)
+    dist.barrier()
 
     log_dir = os.path.join(args.results_dir, args.experiment_name)
     os.makedirs(log_dir, exist_ok=True)
@@ -117,11 +112,10 @@ def main(args, config):
     n_params = sum(p.numel() for p in model.parameters())
     print(f"n_params: {n_params}")
 
-    # seed = config.global_seed * dist.get_world_size() + rank
-    seed = config.global_seed
+    seed = config.global_seed * dist.get_world_size() + rank
     torch.manual_seed(seed)
 
-    # model = DistributedDataParallel(model, find_unused_parameters=True)
+    model = DistributedDataParallel(model, find_unused_parameters=True)
 
     if config.model.enable_mup:
         if config.opt.weight_decay:
@@ -166,13 +160,13 @@ def main(args, config):
 
     latest_ckpt = train_utils.get_last_checkpoint(config, log_dir)
     if latest_ckpt:
-        total_steps = train_utils.restore_from_ckpt(model, optimizer, path=latest_ckpt)
+        total_steps = train_utils.restore_from_ckpt(model.module, optimizer, path=latest_ckpt)
     elif args.resume_from_ckpt:
         total_steps = train_utils.restore_from_ckpt(
-            model, optimizer, path=args.resume_from_ckpt
+            model.module, optimizer, path=args.resume_from_ckpt
         )
 
-    model_ema = train_utils.SimpleEMA(model, decay=config.model.ema_decay)
+    model_ema = train_utils.SimpleEMA(model.module, decay=config.model.ema_decay)
 
     tic = time.time()
     dl_iter = iter(train_utils.wrap_dataloader(train_dataloader))
@@ -234,7 +228,7 @@ def main(args, config):
                 print(f"Rebuilding optimizer at step {total_steps}")
                 optimizer = build_optimizer([decoder_pg])
                 rebuilt_optimizer = True
-                model.encoder.requires_grad_(False)
+                model.module.encoder.requires_grad_(False)
                 model_ema.decay = config.model.ema_decay
 
         dl_tic = time.time()
@@ -263,7 +257,7 @@ def main(args, config):
                     * initial_norms[name]
                 )
 
-        model_ema.update(model, step=total_steps)
+        model_ema.update(model.module, step=total_steps)
 
         total_steps += 1
 
@@ -290,7 +284,7 @@ def main(args, config):
 
             with torch.no_grad():
                 encoder_checksum = sum(
-                    p.mean() for p in model.encoder.parameters()
+                    p.mean() for p in model.module.encoder.parameters()
                 ).item()
                 running_losses["encoder_checksum"] = encoder_checksum
 
@@ -332,7 +326,7 @@ def main(args, config):
                                 model_ema.model
                             ),
                             "model_state_dict": train_utils.cpu_state_dict(
-                                model
+                                model.module
                             ),
                         },
                         local_checkpoint_path,
@@ -384,7 +378,7 @@ def main(args, config):
                                 model_ema.model
                             ),
                             "model_state_dict": train_utils.cpu_state_dict(
-                                model
+                                model.module
                             ),
                         },
                         checkpoint_path,
