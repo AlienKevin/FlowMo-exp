@@ -627,11 +627,8 @@ class FlowMo(nn.Module):
                 param.requires_grad = False
             # Get the hidden size
             self.qwen_hidden_size = self.qwen_model.config.hidden_size
-            # Initialize trainable LFQ embedding
-            self.lfq_embedding = nn.Embedding(
-                num_embeddings=2**self.config.model.codebook_size_for_entropy,
-                embedding_dim=self.qwen_hidden_size
-            )
+            self.qwen_in_projector = nn.Linear(self.config.model.codebook_size_for_entropy, self.qwen_hidden_size, dtype=torch.bfloat16)
+        
         elif config.model.quantization_type.startswith("qwen2.5-coder-0.5b"):
             self.qwen_model = AutoModelForCausalLM.from_pretrained(
                 "Qwen/Qwen2.5-Coder-0.5B",
@@ -845,14 +842,12 @@ class FlowMo(nn.Module):
             unique_indices = torch.unique(indices)
             codebook_usage = len(unique_indices) / codebook_size
 
-            # Reshape indices for embedding lookup: [b, t * fh] -> [b, t, fh]
-            fh = f // self.config.model.codebook_size_for_entropy
-            indices_reshaped = einops.rearrange(indices, '(b t fh) -> b t fh', t=t, fh=fh)
-            # Treat each fh component as a separate token
-            # Embed each index: [b, t, fh] -> [b, t, fh, hidden_size]
-            lfq_embeds_fh = self.lfq_embedding(indices_reshaped)
-            # Rearrange to [b, t * fh, hidden_size]
-            lfq_embeds = einops.rearrange(lfq_embeds_fh, 'b t fh h -> b (t fh) h')
+            # Project quantized directly to Qwen embedding space
+            lfq_embeds = self.qwen_in_projector(einops.rearrange(
+                quantized,
+                "b fg (t fh) -> b (t fh) fg",
+                t=t, fg=self.config.model.codebook_size_for_entropy,
+            ))
 
             lfq_embeds = lfq_embeds.to(self.qwen_model.dtype) # Match Qwen dtype
             effective_lfq_len = lfq_embeds.shape[1] # This is t * fh

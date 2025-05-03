@@ -27,7 +27,7 @@ echo "Using MASTER_PORT="$MASTER_PORT
 batch_size=8
 
 torchrun --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_larp_batch_size_${batch_size}_pretrain" \
+    --experiment-name "flowmo_larp_real_quantized_batch_size_${batch_size}_pretrain" \
     model.context_dim=56 model.codebook_size_for_entropy=14 model.quantization_type="larp" \
     data.batch_size=${batch_size} \
     model.qwen_ce_loss_weight=0.1 \
