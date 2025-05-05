@@ -10,29 +10,15 @@ import math
 from dataclasses import dataclass
 from typing import List, Tuple
 
-# from unsloth import FastLanguageModel
 import einops
 import torch
-import torch.nn.functional as F
 from einops import rearrange, repeat
 from mup import MuReadout
 from torch import Tensor, nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from torchvision.transforms import Normalize
 
 from flowmo import lookup_free_quantize
 
 MUP_ENABLED = True
-
-IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
-
-def preprocess_raw_image(x):
-    resolution = x.shape[-1]
-    x = (x + 1) / 2.
-    x = Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)(x)
-    x = torch.nn.functional.interpolate(x, 224 * (resolution // 256), mode='bicubic')
-    return x
 
 
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:
@@ -433,7 +419,7 @@ class Flux(nn.Module):
     Transformer model for flow matching on sequences.
     """
 
-    def __init__(self, params: FluxParams, name="", lsg=False, repa_layer_idx: int = -1):
+    def __init__(self, params: FluxParams, name="", lsg=False):
         super().__init__()
 
         self.name = name
@@ -453,8 +439,6 @@ class Flux(nn.Module):
             )
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
-        self.repa_layer_idx = repa_layer_idx
-
         self.pe_embedder = EmbedND(
             dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim
         )
@@ -489,7 +473,6 @@ class Flux(nn.Module):
         txt: Tensor,
         txt_ids: Tensor,
         timesteps: Tensor,
-        return_img_layer_idx=-1,
     ) -> Tensor:
         b, c, h, w = img.shape
 
@@ -512,17 +495,11 @@ class Flux(nn.Module):
         pe_single = self.pe_embedder(torch.cat((txt_ids,), dim=1))
         pe_double = self.pe_embedder(torch.cat((txt_ids, img_ids), dim=1))
 
-        aux = {}
-
-        for i, block in enumerate(self.double_blocks):
+        for block in self.double_blocks:
             img, txt = block(img=img, txt=txt, pe=(pe_single, pe_double), vec=vec)
-            if i == return_img_layer_idx:
-                aux[f'img_layer_{i}'] = img
 
         img = self.final_layer_img(img, vec=vec)
-        txt = self.final_layer_txt(txt, vec=vec)
-
-        img_reshaped = rearrange(
+        img = rearrange(
             img,
             "b (gh gw) (ph pw c) -> b c (gh ph) (gw pw)",
             ph=self.patch_size,
@@ -531,9 +508,8 @@ class Flux(nn.Module):
             gw=w // self.patch_size,
         )
 
-        aux["final_txt"] = txt
-
-        return img_reshaped, txt, aux
+        txt = self.final_layer_txt(txt, vec=vec)
+        return img, txt, {"final_txt": txt}
 
 
 def get_weights_to_fix(model):
@@ -541,25 +517,6 @@ def get_weights_to_fix(model):
         for name, module in itertools.chain(model.named_modules()):
             if "double_blocks" in name and isinstance(module, torch.nn.Linear):
                 yield name, module.weight
-
-
-def build_mlp(hidden_size, projector_dim, z_dim, mup_enable):
-    if mup_enable:
-        return nn.Sequential(
-            MuReadout(hidden_size, projector_dim),
-            nn.SiLU(),
-            MuReadout(projector_dim, projector_dim),
-            nn.SiLU(),
-            MuReadout(projector_dim, z_dim),
-        )
-    else:
-        return nn.Sequential(
-            nn.Linear(hidden_size, projector_dim),
-            nn.SiLU(),
-            nn.Linear(projector_dim, projector_dim),
-            nn.SiLU(),
-            nn.Linear(projector_dim, z_dim),
-        )
 
 
 class FlowMo(nn.Module):
@@ -588,62 +545,6 @@ class FlowMo(nn.Module):
                 dim=self.config.model.codebook_size_for_entropy,
                 num_codebooks=1,
                 token_factorization=False,
-            )
-        elif config.model.quantization_type == "lqae":
-            # Load with unsloth
-            self.qwen_model, self.qwen_tokenizer = FastLanguageModel.from_pretrained(
-                model_name = "Qwen/Qwen3-0.6B-Base",
-                max_seq_length = 32768, # Qwen3 0.6B context length
-                dtype = torch.bfloat16,
-                load_in_4bit = True,
-                trust_remote_code = True,
-            )
-            # Freeze the model parameters but keep it in train mode for gradient flow
-            for param in self.qwen_model.parameters():
-                param.requires_grad = False
-            # Get the hidden size
-            self.qwen_hidden_size = self.qwen_model.config.hidden_size
-            # Explicitly set dtype for projectors to match model/desired precision
-            self.qwen_in_projector = nn.Linear(self.encoder_context_dim, self.qwen_hidden_size, dtype=torch.bfloat16)
-            self.qwen_out_projector = nn.Linear(self.qwen_hidden_size, self.context_dim, dtype=torch.bfloat16)
-        elif config.model.quantization_type == "larp":
-            self.quantizer = lookup_free_quantize.LFQ(
-                codebook_size=2**self.config.model.codebook_size_for_entropy,
-                dim=self.config.model.codebook_size_for_entropy,
-                num_codebooks=1,
-                token_factorization=False,
-            )
-
-            # Load with unsloth
-            self.qwen_model, self.qwen_tokenizer = FastLanguageModel.from_pretrained(
-                model_name = "Qwen/Qwen3-0.6B-Base",
-                max_seq_length = 32768,
-                dtype = torch.bfloat16,
-                load_in_4bit = True,
-                trust_remote_code = True,
-            )
-            # Freeze the model parameters but keep it in train mode for gradient flow
-            for param in self.qwen_model.parameters():
-                param.requires_grad = False
-            # Get the hidden size
-            self.qwen_hidden_size = self.qwen_model.config.hidden_size
-            self.qwen_in_projector = nn.Linear(self.config.model.codebook_size_for_entropy, self.qwen_hidden_size, dtype=torch.bfloat16)
-        
-        elif config.model.quantization_type.startswith("qwen2.5-coder-0.5b"):
-            self.qwen_model = AutoModelForCausalLM.from_pretrained(
-                "Qwen/Qwen2.5-Coder-0.5B",
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-            # Freeze the model parameters but keep it in train mode for gradient flow
-            for param in self.qwen_model.parameters():
-                param.requires_grad = False
-            # Get the hidden size
-            self.qwen_hidden_size = self.qwen_model.config.hidden_size
-            self.qwen_tokenizer = AutoTokenizer.from_pretrained(
-                "Qwen/Qwen2.5-Coder-0.5B",
-                trust_remote_code=True
             )
 
         if self.config.model.enc_mup_width is not None:
@@ -675,42 +576,7 @@ class FlowMo(nn.Module):
         decoder_params.axes_dim = [(d // 4) * width for d in decoder_params.axes_dim]
 
         self.encoder = Flux(encoder_params, name="encoder")
-        # Note: Encoder does not need repa_layer_idx
-
-        # REPA Setup
-        self.repa_projector = None
-        if self.config.model.get('enable_repa', False): # Check if REPA is enabled
-            repa_feature_dim = self.config.model.get('repa_feature_dim')
-
-            decoder_hidden_size = decoder_params.hidden_size
-
-            # Determine effective repa_layer_idx, default to dec_depth // 3
-            default_repa_idx = dec_depth // 3
-            effective_repa_layer_idx = self.config.model.get('repa_layer_idx', default_repa_idx)
-            if not (0 <= effective_repa_layer_idx < dec_depth):
-                 print(f"Warning: Invalid repa_layer_idx ({effective_repa_layer_idx}). Using default: {default_repa_idx}")
-                 effective_repa_layer_idx = default_repa_idx
-            self.config.model.repa_layer_idx = effective_repa_layer_idx # Store effective index back to config
-
-            # Initialize decoder with REPA layer index
-            self.decoder = Flux(decoder_params, name="decoder", repa_layer_idx=effective_repa_layer_idx)
-
-            # Always add projector if REPA is enabled
-            # Project from decoder intermediate to feature dimension
-            print(f"REPA: Adding projector from decoder intermediate ({decoder_hidden_size}) to feature dim ({repa_feature_dim})")
-            self.repa_projector = build_mlp(decoder_hidden_size, config.model.repa_projector_dim, repa_feature_dim, self.config.model.get('enable_mup', MUP_ENABLED))
-        else:
-            # REPA not enabled, initialize decoder normally
-            self.decoder = Flux(decoder_params, name="decoder")
-        
-        # CLS Setup
-        self.cls_projector = None
-        if self.config.model.get('enable_cls', False):
-            print(f"CLS: Adding projector from encoder final ({encoder_params.hidden_size}) to 1000 ImageNet classes")
-            if self.config.model.enable_mup:
-                self.cls_projector = MuReadout(encoder_params.hidden_size, 1000)
-            else:
-                self.cls_projector = nn.Linear(encoder_params.hidden_size, 1000)
+        self.decoder = Flux(decoder_params, name="decoder")
 
     @torch.compile
     def encode(self, img):
@@ -721,7 +587,7 @@ class FlowMo(nn.Module):
             (b, self.code_length, self.encoder_context_dim), device=img.device
         )
 
-        _, code, aux = self.encoder(img, img_idxs, txt, txt_idxs, timesteps=None, return_img_layer_idx=self.config.model.enc_depth-1)
+        _, code, aux = self.encoder(img, img_idxs, txt, txt_idxs, timesteps=None)
 
         return code, aux
 
@@ -734,7 +600,7 @@ class FlowMo(nn.Module):
             self.patch_size,
         )
         pred, _, decode_aux = self.decoder(
-            img, img_idxs, code, txt_idxs, timesteps=timesteps, return_img_layer_idx=self.config.model.repa_layer_idx
+            img, img_idxs, code, txt_idxs, timesteps=timesteps
         )
         return pred, decode_aux
 
@@ -755,7 +621,7 @@ class FlowMo(nn.Module):
         )
 
     @torch.compile
-    def _quantize(self, code, caption):
+    def _quantize(self, code):
         """
         Args:
             code: [b codelength context dim]
@@ -768,9 +634,6 @@ class FlowMo(nn.Module):
         if self.config.model.quantization_type == "noop":
             quantized = code
             quantizer_loss = torch.tensor(0.0).to(code.device)
-            losses = {
-                'quantizer_loss': quantizer_loss,
-            }
         elif self.config.model.quantization_type == "kl":
             # colocating features of same token before split is maybe slightly
             # better?
@@ -784,9 +647,6 @@ class FlowMo(nn.Module):
                 t=t,
             )
             quantizer_loss = _kl_diagonal_gaussian(mean, logvar)
-            losses = {
-                'quantizer_loss': quantizer_loss,
-            }
         elif self.config.model.quantization_type == "lfq":
             assert f % self.config.model.codebook_size_for_entropy == 0, f
             code = einops.rearrange(
@@ -805,325 +665,38 @@ class FlowMo(nn.Module):
                 entropy_aux_loss * self.config.model.entropy_loss_weight
                 + breakdown.commitment * self.config.model.commit_loss_weight
             )
-            # Calculate codebook usage
-            codebook_size = 2**self.config.model.codebook_size_for_entropy
-            unique_indices = torch.unique(indices)
-            codebook_usage = len(unique_indices) / codebook_size
-
             code = quantized
-            losses = {
-                'quantizer_loss': quantizer_loss,
-                'codebook_usage': codebook_usage,
-            }
-        elif self.config.model.quantization_type == 'larp':
-            code_orig_dtype = code.dtype
-            b, t, f = code.shape
-            assert f % self.config.model.codebook_size_for_entropy == 0, f
-
-            # --- LFQ Quantization ---
-            code_lfq_input = einops.rearrange(
-                code,
-                "b t (fg fh) -> b fg (t fh)",
-                fg=self.config.model.codebook_size_for_entropy,
-            )
-            (quantized, entropy_aux_loss, indices), breakdown = self.quantizer(
-                code_lfq_input, return_loss_breakdown=True
-            )
-            # 'indices' shape: flattened([b, num_codebooks (1), t * fh])
-            # 'quantized' shape: [b, fg, t * fh]
-
-            quantizer_loss = (
-                entropy_aux_loss * self.config.model.entropy_loss_weight
-                + breakdown.commitment * self.config.model.commit_loss_weight
-            )
-
-            # Calculate codebook usage
-            codebook_size = 2**self.config.model.codebook_size_for_entropy
-            unique_indices = torch.unique(indices)
-            codebook_usage = len(unique_indices) / codebook_size
-
-            # Project quantized directly to Qwen embedding space
-            lfq_embeds = self.qwen_in_projector(einops.rearrange(
-                quantized,
-                "b fg (t fh) -> b (t fh) fg",
-                t=t, fg=self.config.model.codebook_size_for_entropy,
-            ))
-
-            lfq_embeds = lfq_embeds.to(self.qwen_model.dtype) # Match Qwen dtype
-            effective_lfq_len = lfq_embeds.shape[1] # This is t * fh
-
-            # --- Caption Processing ---
-            if caption is None:
-                caption = [""] * b # Use empty captions if none provided
-
-            # Tokenize captions with padding
-            tokenizer_output = self.qwen_tokenizer(
-                caption,
-                return_tensors="pt",
-                padding="longest", # Pad to the longest sequence in the batch
-                truncation=True,   # Truncate if longer than max length
-                max_length=self.qwen_tokenizer.model_max_length # Use model's max length
-            )
-            caption_ids = tokenizer_output.input_ids.to(code.device) # [b, caption_len]
-            attention_mask = tokenizer_output.attention_mask.to(code.device) # [b, caption_len]
-
-            # Get caption embeddings
-            caption_embeds = self.qwen_model.get_input_embeddings()(caption_ids) # [b, caption_len, hidden_size]
-            caption_embeds = caption_embeds.to(self.qwen_model.dtype) # Match Qwen dtype
-
-            # --- Combine and Pass through Qwen ---
-            combined_embeds = torch.cat([lfq_embeds, caption_embeds], dim=1) # [b, effective_lfq_len + caption_len, hidden_size]
-            # Create combined attention mask (LFQ tokens always attended, caption tokens masked)
-            lfq_mask = torch.ones_like(lfq_embeds[..., 0], dtype=torch.long) # [b, effective_lfq_len]
-            combined_attention_mask = torch.cat([lfq_mask, attention_mask], dim=1) # [b, effective_lfq_len + caption_len]
-
-            outputs = self.qwen_model(
-                inputs_embeds=combined_embeds,
-                attention_mask=combined_attention_mask, # Provide the combined mask
-                output_hidden_states=False, # Don't need hidden states here
-                return_dict=True
-            )
-
-            # --- Calculate Qwen CE Loss (on Captions Only) ---
-            qwen_ce_loss = torch.tensor(0.0, device=code.device, dtype=torch.float32)
-            if self.config.model.get("qwen_ce_loss_weight", 0.0) > 0:
-                logits = outputs.logits # Shape: [b, effective_lfq_len + caption_len, vocab_size]
-
-                # Slice logits and targets to only include caption tokens
-                # Start slicing after the LFQ tokens
-                caption_logits = logits[:, effective_lfq_len:, :] # [b, caption_len, vocab_size]
-                vocab_size = caption_logits.size(-1)
-
-                # Shift logits and labels for next token prediction task
-                # Logits for position i predict token i+1
-                shift_logits = caption_logits[:, :-1, :].contiguous() # [b, caption_len - 1, vocab_size]
-                shift_labels = caption_ids[:, 1:].contiguous()       # [b, caption_len - 1]
-
-                # Flatten the tokens
-                loss_fct = nn.CrossEntropyLoss(ignore_index=self.qwen_tokenizer.pad_token_id) # Ignore padding
-                qwen_ce_loss = loss_fct(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
-                qwen_ce_loss = qwen_ce_loss * self.config.model.qwen_ce_loss_weight
-
-            # --- Prepare Final Output ---
-            # The 'code' returned for the decoder is the original LFQ quantized output
-            quantized_final = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
-            code = quantized_final.to(code_orig_dtype) # Back to original dtype
-
-            losses = {
-                'quantizer_loss': quantizer_loss,
-                'qwen_ce_loss': qwen_ce_loss,
-                'codebook_usage': codebook_usage,
-            }
-        elif self.config.model.quantization_type == 'lqae':
-            code_orig_dtype = code.dtype
-            b, t, _ = code.shape
-            qwen_input_embeds = self.qwen_in_projector(code) # Project image features
-
-            # --- Actual Quantization Step ---
-            with torch.no_grad(): # Quantization lookup should not require gradients here
-                embed_matrix = self.qwen_model.get_input_embeddings().weight.float() # (vocab_size, hidden_size)
-                vocab_size = embed_matrix.shape[0]
-                qwen_input_flat = qwen_input_embeds.view(-1, self.qwen_hidden_size).float()
-
-                # L2 distance calculation
-                input_sq = torch.sum(qwen_input_flat**2, dim=1, keepdim=True)
-                matrix_sq = torch.sum(embed_matrix**2, dim=1).unsqueeze(0)
-                dot_prod = torch.matmul(qwen_input_flat, embed_matrix.t())
-                distances_sq = input_sq - 2 * dot_prod + matrix_sq
-
-                quantized_ids = torch.argmin(distances_sq, dim=-1) # (b*t)
-                codebook_usage = len(torch.unique(quantized_ids)) / vocab_size
-
-            # Get the embeddings corresponding to the quantized IDs
-            quantized_embeds = self.qwen_model.get_input_embeddings()(quantized_ids.view(b, t))
-            quantized_embeds = quantized_embeds.to(code_orig_dtype) # Match original dtype for model input
-            indices = quantized_ids.view(b, t) # Keep track of indices
-            # ---------------------------------
-
-            ste_quantized_embeds = qwen_input_embeds + (quantized_embeds - qwen_input_embeds).detach()
-
-            # Pass the *STE-modified quantized* embeddings through Qwen
-            outputs = self.qwen_model(
-                inputs_embeds=ste_quantized_embeds, # Use STE output here
-                output_hidden_states=True,
-                return_dict=True
-            )
-
-            # Use the last hidden state (from quantized input) for the decoder
-            processed_code = outputs.hidden_states[-1]
-            processed_code = self.qwen_out_projector(processed_code).to(code_orig_dtype) # Project back
-
-            # Calculate Qwen Cross-Entropy Loss (Logits vs Quantized IDs)
-            qwen_ce_loss = torch.tensor(0.0, device=code.device, dtype=torch.float32)
-            if self.config.model.get("qwen_ce_loss_weight") > 0:
-                logits = outputs.logits # Shape: (b, t, vocab_size)
-                qwen_ce_loss = F.cross_entropy(
-                    logits.view(-1, logits.size(-1)), # (b*t, vocab_size)
-                    quantized_ids, # Target: the IDs we quantized to
-                    reduction='mean'
-                ).float()
-
-            commit_loss_weight = self.config.model.get("commit_loss_weight")
-            e_latent_loss = F.mse_loss(quantized_embeds.detach(), qwen_input_embeds)
-            quantizer_loss = commit_loss_weight * e_latent_loss
-
-            code = processed_code # The final output for the decoder is the processed quantized code
-            losses = {
-                'quantizer_loss': quantizer_loss,
-                'qwen_ce_loss': qwen_ce_loss,
-                'codebook_usage': codebook_usage
-            }
-        elif self.config.model.quantization_type.startswith('qwen2.5-coder-0.5b'):
-            span_pert = float(self.config.model.quantization_type.removeprefix('qwen2.5-coder-0.5b_span_'))
-
-            # Apply FIM (Fill-in-the-Middle) transformation
-            b, t, f_qwen = code.shape # f_qwen is self.qwen_hidden_size
-            span_len = int(t * span_pert)
-
-            assert(span_len > 0)
-
-            # Randomly pick the start index for the span
-            start_idx = torch.randint(0, t - span_len + 1, (1,)).item()
-
-            # print(f'start_idx: {start_idx}, span_len: {span_len}')
-
-            # Split the code tensor
-            code_pre = code[:, :start_idx, :]
-            code_mid = code[:, start_idx : start_idx + span_len, :]
-            code_suf = code[:, start_idx + span_len :, :]
-
-            # Get FIM token embeddings (assuming tokenizer and embedding layer are accessible)
-            # Ensure tokenizer and model are on the correct device
-            fim_prefix_id = self.qwen_tokenizer("<|fim_prefix|>", return_tensors="pt").input_ids[0].to(code.device)
-            fim_suffix_id = self.qwen_tokenizer("<|fim_suffix|>", return_tensors="pt").input_ids[0].to(code.device)
-            fim_middle_id = self.qwen_tokenizer("<|fim_middle|>", return_tensors="pt").input_ids[0].to(code.device)
-
-            embed_layer = self.qwen_model.get_input_embeddings()
-            fim_prefix_emb = embed_layer(fim_prefix_id).expand(b, 1, f_qwen)
-            fim_suffix_emb = embed_layer(fim_suffix_id).expand(b, 1, f_qwen)
-            fim_middle_emb = embed_layer(fim_middle_id).expand(b, 1, f_qwen)
-
-            # Construct FIM input sequence: <|fim_prefix|> <pre> <|fim_suffix|> <suf> <|fim_middle|> <mid>
-            fim_input = torch.cat([
-                fim_prefix_emb,
-                code_pre,
-                fim_suffix_emb,
-                code_suf,
-                fim_middle_emb,
-                code_mid
-            ], dim=1)
-
-            # print('fim_input.shape', fim_input.shape)
-
-            # Pass through Qwen model - no torch.no_grad() to allow gradient flow
-            outputs = self.qwen_model(
-                inputs_embeds=fim_input,
-                output_hidden_states=True,
-                return_dict=True
-            )
-
-            # Get the final layer hidden states
-            final_hidden_states = outputs.hidden_states[-1]
-            # print('final_hidden_states.shape:', final_hidden_states.shape)
-
-            # Calculate the start index of the output corresponding to the original code_mid part
-            # Lengths: prefix(1) + pre(start_idx) + suffix(1) + suf(t - start_idx - span_len)
-            output_mid_start_idx = 1 + start_idx + 1 + (t - start_idx - span_len)
-            output_mid_end_idx = output_mid_start_idx + span_len
-            # print(f'output_mid_start_idx: {output_mid_start_idx}, output_mid_end_idx: {output_mid_end_idx}')
-
-            # Extract the hidden states corresponding to the original middle part's position
-            output_mid = final_hidden_states[:, output_mid_start_idx:output_mid_end_idx, :]
-            # print('output_mid.shape', output_mid.shape)
-
-            # Create the final code tensor by replacing the middle section in the *original* projected code
-            # Clone the input 'code' to preserve gradients for non-replaced parts if necessary,
-            # though gradients will primarily flow through output_mid.
-            processed_code = code.clone()
-            # print('code.shape', processed_code.shape)
-            processed_code[:, start_idx : start_idx + span_len, :] = output_mid
-            # print('processed_code.shape', processed_code.shape)
-            # print('processed_code - code:', (processed_code - code)[0, :, 0])
-            code = processed_code
-
-            quantizer_loss = torch.tensor(0.0).to(code.device)
-            losses = {
-                'quantizer_loss': quantizer_loss,
-            }
         else:
             raise NotImplementedError
-
-        return code, indices, losses
+        return code, indices, quantizer_loss
 
     def forward(
         self,
         img,
         noised_img,
         timesteps,
-        external_enc_features: Tensor | None = None,
-        caption: list[str] | None = None,
         enable_cfg=True,
     ):
         aux = {}
 
         code, encode_aux = self.encode(img)
-        aux.update(encode_aux) # Store any aux info from encoder
 
         aux["original_code"] = code
 
         b, t, f = code.shape
 
-        # Quantize the code
-        code, _, aux_losses = self._quantize(code, caption)
-        aux.update(aux_losses)
+        code, _, aux["quantizer_loss"] = self._quantize(code)
 
-        # Prepare code for decoder (add mask)
         mask = torch.ones_like(code[..., :1])
         code = torch.concatenate([code, mask], axis=-1)
         code_pre_cfg = code
 
-        # Apply CFG dropout if enabled
         if self.config.model.enable_cfg and enable_cfg:
             cfg_mask = (torch.rand((b,), device=code.device) > 0.1)[:, None, None]
             code = code * cfg_mask
 
-        # Run the decoder
         v_est, decode_aux = self.decode(noised_img, code, timesteps)
         aux.update(decode_aux)
-
-        # --- REPA Loss Calculation ---
-        aux['repa_loss'] = torch.tensor(0.0, device=img.device)
-        # Check if REPA is enabled AND external features were provided
-        if self.config.model.get('enable_repa', False):
-            enc_img = external_enc_features
-
-            repa_idx = self.config.model.get('repa_layer_idx') # Already validated in init
-            dec_intermediate_img_key = f'img_layer_{repa_idx}'
-            dec_img = aux.get(dec_intermediate_img_key) # Shape: [b, num_patches, dec_hidden_size]
-
-            if enc_img is not None and dec_img is not None:
-                if self.repa_projector is not None:
-                    self.repa_projector = self.repa_projector.to(dec_img.device)
-                    dec_img = self.repa_projector(dec_img) # Now shape [b, num_patches, repa_feature_dim]
-
-                if enc_img.shape == dec_img.shape:
-                    # Normalize patch embeddings
-                    enc_img_norm = F.normalize(enc_img, p=2, dim=-1)
-                    dec_img_norm = F.normalize(dec_img, p=2, dim=-1)
-
-                    # Calculate Negative Cosine Similarity loss
-                    repa_loss = (-(enc_img_norm * dec_img_norm).sum(dim=-1)).mean()
-                    repa_loss_weight = self.config.model.get('repa_loss_weight')
-
-                    aux['repa_loss'] = repa_loss * repa_loss_weight
-                else:
-                    # This warning would trigger if projection didn't result in matching shapes
-                    print(f"Warning: REPA shape mismatch after projection: External {enc_img.shape} vs Decoder {dec_img.shape}")
-            else:
-                 # Warnings if expected activations are missing
-                 if enc_img is None: print(f"Warning: REPA enabled but external_enc_features were None.") # Should not happen due to outer check
-                 if dec_img is None: print(f"Warning: REPA enabled but intermediate decoder layer '{dec_intermediate_img_key}' not found in aux.")
-        # --- End REPA ---
 
         if self.config.model.posttrain_sample:
             aux["posttrain_sample"] = self.reconstruct_checkpoint(code_pre_cfg)
@@ -1177,14 +750,7 @@ class FlowMo(nn.Module):
             if code is None:
                 x = images.cuda()
                 prequantized_code = model.encode(x)[0].cuda()
-                # print('prequantized_code:', prequantized_code.shape)
-                # print(prequantized_code[0])
-                if self.config.model.quantization_type != 'qwen2.5-coder-0.5b':
-                    code = prequantized_code
-                else:
-                    code, _, _ = model._quantize(prequantized_code)
-                # print('code:', code.shape)
-                # print(code[0])
+                code, _, _ = model._quantize(prequantized_code)
 
             z = torch.randn((bs, 3, h, w)).cuda()
 
@@ -1208,8 +774,6 @@ class FlowMo(nn.Module):
 
 def rf_loss(config, model, batch, aux_state):
     x = batch["image"]
-    y = batch["label"].to(x.device)
-    caption = batch["caption"]
     b = x.size(0)
 
     if config.opt.schedule == "lognormal":
@@ -1233,27 +797,10 @@ def rf_loss(config, model, batch, aux_state):
 
     zt, t = zt.to(x.dtype), t.to(x.dtype)
 
-    # --- Compute External Features (if REPA enabled) ---
-    external_features = None
-    if config.model.get("enable_repa", False):
-        external_encoder = aux_state.get('external_encoder')
-
-        with torch.no_grad(): # Don't need gradients through external encoder
-            x_preprocessed = preprocess_raw_image(x)
-            features_output = external_encoder.forward_features(x_preprocessed)
-            external_features = features_output['x_norm_patchtokens']
-            expected_dim = config.model.get('repa_feature_dim')
-            if expected_dim and external_features.shape[-1] != expected_dim:
-                print(f"Warning: External features dim mismatch. Expected {expected_dim}, Got {external_features.shape[-1]}")
-                external_features = None # Nullify if dim is wrong
-
-
     vtheta, aux = model(
-        img=x,                  # Original image (potentially used by internal encoder if run)
-        noised_img=zt,          # Noised image for diffusion step
-        timesteps=t.reshape((b,)), # Timestep for diffusion
-        external_enc_features=external_features, # Pass computed external features
-        caption=caption,
+        img=x,
+        noised_img=zt,
+        timesteps=t.reshape((b,)),
     )
 
     diff = z1 - vtheta - x
@@ -1263,33 +810,8 @@ def rf_loss(config, model, batch, aux_state):
     loss = loss.mean()
 
     aux["loss_dict"] = {}
-    aux["loss_dict"]["diffusion_loss"] = loss.detach().item()
-    aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"].detach().item()
-
-    if "qwen_ce_loss" in aux:
-        qwen_ce_weight = config.model.get("qwen_ce_loss_weight")
-        ce_loss = aux["qwen_ce_loss"] * qwen_ce_weight
-        aux["loss_dict"]["qwen_ce_loss"] = ce_loss.detach().item()
-        loss = loss + ce_loss
-    
-    if "codebook_usage" in aux:
-        aux["loss_dict"]["codebook_usage"] = aux["codebook_usage"]
-
-    # Add classification loss if enabled
-    if config.model.get("enable_cls", False):
-        img_emb = aux[f'img_layer_{config.model.enc_depth-1}']
-        logits = model.cls_projector(img_emb.mean(dim=1))
-        cls_loss = F.cross_entropy(logits, y)
-        aux["loss_dict"]["cls_loss"] = cls_loss.detach().item()
-        loss = loss + cls_loss
-
-    # Add REPA loss if enabled and present
-    if config.model.get("enable_repa", False) and "repa_loss" in aux:
-        repa_loss = aux["repa_loss"] # Already weighted in forward pass
-        aux["loss_dict"]["repa_loss"] = repa_loss.detach().item()
-        loss = loss + repa_loss
-    else:
-        aux["loss_dict"]["repa_loss"] = 0.0
+    aux["loss_dict"]["diffusion_loss"] = loss
+    aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"]
 
     if config.opt.lpips_weight != 0.0:
         aux_loss = 0.0
@@ -1298,12 +820,12 @@ def rf_loss(config, model, batch, aux_state):
 
         lpips_dist = aux_state["lpips_model"](x, x_pred)
         lpips_dist = (config.opt.lpips_weight * lpips_dist).mean() + aux_loss
-        aux["loss_dict"]["lpips_loss"] = lpips_dist.detach().item()
+        aux["loss_dict"]["lpips_loss"] = lpips_dist
     else:
         lpips_dist = 0.0
 
     loss = loss + aux["quantizer_loss"] + lpips_dist
-    aux["loss_dict"]["total_loss"] = loss.detach().item()
+    aux["loss_dict"]["total_loss"] = loss
     return loss, aux
 
 

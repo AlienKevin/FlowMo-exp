@@ -13,8 +13,8 @@ data:
 
 model:
   enable_mup: True
-  patch_size: 8
-  mup_width: 4
+  patch_size: 4
+  mup_width: 6
   enc_mup_width: 4
 
   fix_initial_norms: True
@@ -26,15 +26,6 @@ model:
   codebook_size_for_entropy: 9
   entropy_loss_weight: 0.0025
   commit_loss_weight: 0.000625
-  qwen_ce_loss_weight: 0.001
-  
-  enable_repa: False
-  repa_projector_dim: 2048
-  repa_feature_dim: 768
-  repa_loss_weight: 0.5
-  repa_layer_idx: -1
-
-  enable_cls: False
 
   enc_depth: 8
   dec_depth: 16
