@@ -656,6 +656,7 @@ class FlowMo(nn.Module):
         if self.config.model.quantization_type == "noop":
             quantized = code
             quantizer_loss = torch.tensor(0.0).to(code.device)
+            aux = {"quantizer_loss": quantizer_loss}
         elif self.config.model.quantization_type == "kl":
             # colocating features of same token before split is maybe slightly
             # better?
@@ -669,6 +670,7 @@ class FlowMo(nn.Module):
                 t=t,
             )
             quantizer_loss = _kl_diagonal_gaussian(mean, logvar)
+            aux = {"quantizer_loss": quantizer_loss}
         elif self.config.model.quantization_type == "lfq":
             assert f % self.config.model.codebook_size_for_entropy == 0, f
             code = einops.rearrange(
@@ -688,6 +690,7 @@ class FlowMo(nn.Module):
                 + breakdown.commitment * self.config.model.commit_loss_weight
             )
             code = quantized
+            aux = {"quantizer_loss": quantizer_loss}
         elif self.config.model.quantization_type == "lfq_qwen":
             assert f % self.config.model.codebook_size_for_entropy == 0, f
             code = einops.rearrange(
@@ -713,9 +716,10 @@ class FlowMo(nn.Module):
             # Transform targets from {-1, 1} to {0, 1}
             targets = (quantized[:, 1:] + 1) / 2
             qwen_bce_loss = self.config.model.qwen_bce_loss_weight * F.binary_cross_entropy_with_logits(qwen_logits[:, :-1], targets)
+            aux = {"quantizer_loss": quantizer_loss, "qwen_bce_loss": qwen_bce_loss}
         else:
             raise NotImplementedError
-        return code, indices, {'quantizer_loss': quantizer_loss, 'qwen_bce_loss': qwen_bce_loss}
+        return code, indices, aux
 
     def forward(
         self,
