@@ -712,7 +712,7 @@ class FlowMo(nn.Module):
             qwen_logits = self.decoder_projector(qwen_last_hidden_state)
             # Transform targets from {-1, 1} to {0, 1}
             targets = (quantized[:, 1:] + 1) / 2
-            qwen_bce_loss = F.binary_cross_entropy_with_logits(qwen_logits[:, :-1], targets)
+            qwen_bce_loss = self.config.model.qwen_bce_loss_weight * F.binary_cross_entropy_with_logits(qwen_logits[:, :-1], targets)
         else:
             raise NotImplementedError
         return code, indices, {'quantizer_loss': quantizer_loss, 'qwen_bce_loss': qwen_bce_loss}

@@ -26,6 +26,7 @@ model:
   codebook_size_for_entropy: 9
   entropy_loss_weight: 0.0025
   commit_loss_weight: 0.000625
+  qwen_bce_loss_weight: 0.001
 
   enc_depth: 8
   dec_depth: 16
