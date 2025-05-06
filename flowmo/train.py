@@ -134,10 +134,9 @@ def main(args, config):
     decoder_pg = {
         "params": [p for (n, p) in model.named_parameters() if "decoder" in n]
     }
-    # We also backprop through qwen
-    # assert set(encoder_pg["params"]).union(set(decoder_pg["params"])) == set(
-    #     model.parameters()
-    # )
+    # Exclude qwen_model parameters from the assertion check
+    all_params = set(p for n, p in model.named_parameters() if not n.startswith('module.qwen_model'))
+    assert set(encoder_pg["params"]).union(set(decoder_pg["params"])) == all_params
 
     def build_optimizer(pgs):
         optimizer = opt_cls(
@@ -203,19 +202,6 @@ def main(args, config):
             )
         else:
             raise NotImplementedError
-    
-    if config.model.enable_repa:
-        import timm
-        encoder = torch.hub.load('facebookresearch/dinov2', f'dinov2_vitb14')
-        del encoder.head
-        patch_resolution = config.data.image_size//config.model.patch_size
-        encoder.pos_embed.data = timm.layers.pos_embed.resample_abs_pos_embed(
-            encoder.pos_embed.data, [patch_resolution, patch_resolution],
-        )
-        encoder.head = torch.nn.Identity()
-        encoder = encoder.to(device)
-        encoder.eval().requires_grad_(False).cuda()
-        aux_state["external_encoder"] = encoder
 
     running_losses = {}
 
@@ -276,7 +262,7 @@ def main(args, config):
 
             steps_per_sec = config.trainer.log_every / (toc - tic)
             running_losses = {
-                k: (l / config.trainer.log_every)
+                k: (l / config.trainer.log_every).item()
                 for (k, l) in running_losses.items()
             }
             reserved_gb = torch.cuda.max_memory_reserved() / 1e9

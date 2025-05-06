@@ -14,7 +14,9 @@ import einops
 import torch
 from einops import rearrange, repeat
 from mup import MuReadout
+from unsloth import FastLanguageModel
 from torch import Tensor, nn
+import torch.nn.functional as F
 
 from flowmo import lookup_free_quantize
 
@@ -546,6 +548,26 @@ class FlowMo(nn.Module):
                 num_codebooks=1,
                 token_factorization=False,
             )
+        elif config.model.quantization_type == 'lfq_qwen':
+            self.quantizer = lookup_free_quantize.LFQ(
+                codebook_size=2**self.config.model.codebook_size_for_entropy,
+                dim=self.config.model.codebook_size_for_entropy,
+                num_codebooks=1,
+                token_factorization=False,
+            )
+            model_name = "Qwen/Qwen3-0.6B-Base"
+            self.qwen_model, self.qwen_tokenizer = FastLanguageModel.from_pretrained(
+                model_name,
+                max_seq_length = 2048,
+                dtype = torch.bfloat16,
+                trust_remote_code = True,
+            )
+            # Freeze the Qwen model parameters
+            for param in self.qwen_model.parameters():
+                param.requires_grad = False
+            qwen_hidden_size = self.qwen_model.config.hidden_size
+            self.encoder_projector = nn.Linear(self.context_dim, qwen_hidden_size)
+            self.decoder_projector = nn.Linear(qwen_hidden_size, self.context_dim)
 
         if self.config.model.enc_mup_width is not None:
             enc_width = self.config.model.enc_mup_width
@@ -666,9 +688,32 @@ class FlowMo(nn.Module):
                 + breakdown.commitment * self.config.model.commit_loss_weight
             )
             code = quantized
+        elif self.config.model.quantization_type == "lfq_qwen":
+            assert f % self.config.model.codebook_size_for_entropy == 0, f
+            code = einops.rearrange(
+                code,
+                "b t (fg fh) -> b fg (t fh)",
+                fg=self.config.model.codebook_size_for_entropy,
+            )
+
+            (quantized, entropy_aux_loss, indices), breakdown = self.quantizer(
+                code, return_loss_breakdown=True
+            )
+            assert quantized.shape == code.shape
+            quantized = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
+
+            quantizer_loss = (
+                entropy_aux_loss * self.config.model.entropy_loss_weight
+                + breakdown.commitment * self.config.model.commit_loss_weight
+            )
+            code = quantized
+
+            qwen_last_hidden_state = self.qwen_model(inputs_embeds=self.encoder_projector(quantized), output_hidden_states=True).hidden_states[-1]
+            qwen_logits = self.decoder_projector(qwen_last_hidden_state)
+            qwen_bce_loss = F.binary_cross_entropy_with_logits(qwen_logits[:, :-1], quantized[:, 1:])
         else:
             raise NotImplementedError
-        return code, indices, quantizer_loss
+        return code, indices, {'quantizer_loss': quantizer_loss, 'qwen_bce_loss': qwen_bce_loss}
 
     def forward(
         self,
@@ -685,7 +730,8 @@ class FlowMo(nn.Module):
 
         b, t, f = code.shape
 
-        code, _, aux["quantizer_loss"] = self._quantize(code)
+        code, _, quant_aux = self._quantize(code)
+        aux.update(quant_aux)
 
         mask = torch.ones_like(code[..., :1])
         code = torch.concatenate([code, mask], axis=-1)
@@ -806,12 +852,14 @@ def rf_loss(config, model, batch, aux_state):
     diff = z1 - vtheta - x
     x_pred = zt - vtheta * t
 
-    loss = ((diff) ** 2).mean(dim=list(range(1, len(x.shape))))
-    loss = loss.mean()
+    diffusion_loss = ((diff) ** 2).mean(dim=list(range(1, len(x.shape))))
+    diffusion_loss = diffusion_loss.mean()
 
     aux["loss_dict"] = {}
-    aux["loss_dict"]["diffusion_loss"] = loss
-    aux["loss_dict"]["quantizer_loss"] = aux["quantizer_loss"]
+    aux["loss_dict"]["diffusion_loss"] = diffusion_loss
+    for k in aux.keys():
+        if k.endswith('_loss'):
+            aux["loss_dict"][k] = aux[k]
 
     if config.opt.lpips_weight != 0.0:
         aux_loss = 0.0
@@ -821,12 +869,9 @@ def rf_loss(config, model, batch, aux_state):
         lpips_dist = aux_state["lpips_model"](x, x_pred)
         lpips_dist = (config.opt.lpips_weight * lpips_dist).mean() + aux_loss
         aux["loss_dict"]["lpips_loss"] = lpips_dist
-    else:
-        lpips_dist = 0.0
 
-    loss = loss + aux["quantizer_loss"] + lpips_dist
-    aux["loss_dict"]["total_loss"] = loss
-    return loss, aux
+    aux["loss_dict"]["total_loss"] = sum(aux["loss_dict"].values())
+    return aux["loss_dict"]["total_loss"], aux
 
 
 def _edm_to_flow_convention(noise_level):
