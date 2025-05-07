@@ -232,7 +232,7 @@ def restore_from_ckpt(model, optimizer, path):
     return total_steps
 
 
-def cpu_state_dict(model, ignore_modules=("qwen_model",)):
+def cpu_state_dict(model, ignore_modules=()):
     state_dict = model.state_dict()
     filtered_state_dict = {}
     

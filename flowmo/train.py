@@ -134,9 +134,11 @@ def main(args, config):
     decoder_pg = {
         "params": [p for (n, p) in model.named_parameters() if "decoder" in n]
     }
-    # Exclude qwen_model parameters from the assertion check
-    all_params = set(p for n, p in model.named_parameters() if not n.startswith('module.qwen_model'))
-    assert set(encoder_pg["params"]).union(set(decoder_pg["params"])) == all_params
+    qwen_pg = {
+        "params": [p for (n, p) in model.named_parameters() if "qwen_model" in n]
+    }
+    all_params = set(p for n, p in model.named_parameters())
+    assert set(encoder_pg["params"]).union(set(decoder_pg["params"])).union(set(qwen_pg["params"])) == all_params
 
     def build_optimizer(pgs):
         optimizer = opt_cls(
@@ -147,7 +149,7 @@ def main(args, config):
         )
         return optimizer
 
-    optimizer = build_optimizer([encoder_pg, decoder_pg])
+    optimizer = build_optimizer([encoder_pg, decoder_pg, qwen_pg])
     rebuilt_optimizer = False
 
     train_dataloader = train_utils.load_dataset(config, split='train')

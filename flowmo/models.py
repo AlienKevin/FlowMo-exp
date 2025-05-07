@@ -560,11 +560,23 @@ class FlowMo(nn.Module):
                 model_name,
                 max_seq_length = 2048,
                 dtype = torch.bfloat16,
+                load_in_4bit = False,
+                load_in_8bit = False,
                 trust_remote_code = True,
             )
-            # Freeze the Qwen model parameters
-            for param in self.qwen_model.parameters():
-                param.requires_grad = False
+            # # Randomize the weights in the Qwen model
+            # for name, param in self.qwen_model.named_parameters():
+            #     if 'weight' in name:
+            #         # Initialize with random values from normal distribution
+            #         param.data = torch.randn_like(param.data) * 0.02  # Using 0.02 as standard deviation
+            #         print(f"Randomizing weight: {name}, shape: {param.data.shape}")
+            #     elif 'bias' in name:
+            #         # Initialize biases to zero
+            #         param.data.zero_()
+            #         print(f"Zeroing bias: {name}, shape: {param.data.shape}")
+            # # Freeze the Qwen model parameters
+            # for param in self.qwen_model.parameters():
+            #     param.requires_grad = False
             qwen_hidden_size = self.qwen_model.config.hidden_size
             self.encoder_projector = nn.Linear(self.context_dim, qwen_hidden_size)
             self.decoder_projector = nn.Linear(qwen_hidden_size, self.context_dim)
@@ -714,7 +726,7 @@ class FlowMo(nn.Module):
             qwen_last_hidden_state = self.qwen_model(inputs_embeds=self.encoder_projector(quantized), output_hidden_states=True).hidden_states[-1]
             qwen_logits = self.decoder_projector(qwen_last_hidden_state)
             # Transform targets from {-1, 1} to {0, 1}
-            targets = (quantized[:, 1:] + 1) / 2
+            targets = (quantized.detach()[:, 1:] + 1) / 2
             qwen_bce_loss = self.config.model.qwen_bce_loss_weight * F.binary_cross_entropy_with_logits(qwen_logits[:, :-1], targets)
             aux = {"quantizer_loss": quantizer_loss, "qwen_bce_loss": qwen_bce_loss}
         else:
