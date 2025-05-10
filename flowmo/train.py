@@ -129,21 +129,23 @@ def main(args, config):
             opt_cls = optim.Adam
 
     encoder_pg = {
-        "params": [p for (n, p) in model.named_parameters() if "encoder" in n]
+        "params": [p for (n, p) in model.named_parameters() if "encoder" in n],
+        "lr": config.opt.lr,
     }
     decoder_pg = {
-        "params": [p for (n, p) in model.named_parameters() if "decoder" in n]
+        "params": [p for (n, p) in model.named_parameters() if "decoder" in n],
+        "lr": config.opt.lr,
     }
     qwen_pg = {
-        "params": [p for (n, p) in model.named_parameters() if "qwen_model" in n]
+        "params": [p for (n, p) in model.named_parameters() if ("qwen_model" in n) and (("qwen_model_input_projector" in n) or ("qwen_model_output_projector" in n))],
+        "lr": config.opt.qwen_lr,
     }
-    all_params = set(p for n, p in model.named_parameters())
-    assert set(encoder_pg["params"]).union(set(decoder_pg["params"])).union(set(qwen_pg["params"])) == all_params
+    # all_params = set(p for n, p in model.named_parameters())
+    # assert set(encoder_pg["params"]).union(set(decoder_pg["params"])).union(set(qwen_pg["params"])) == all_params
 
     def build_optimizer(pgs):
         optimizer = opt_cls(
             pgs,
-            lr=config.opt.lr,
             weight_decay=config.opt.weight_decay,
             betas=(config.opt.beta1, config.opt.beta2),
         )

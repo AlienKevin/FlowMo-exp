@@ -574,12 +574,12 @@ class FlowMo(nn.Module):
             #         # Initialize biases to zero
             #         param.data.zero_()
             #         print(f"Zeroing bias: {name}, shape: {param.data.shape}")
-            # # Freeze the Qwen model parameters
-            # for param in self.qwen_model.parameters():
-            #     param.requires_grad = False
+            # Freeze the Qwen model parameters
+            for param in self.qwen_model.parameters():
+                param.requires_grad = False
             qwen_hidden_size = self.qwen_model.config.hidden_size
-            self.encoder_projector = nn.Linear(self.context_dim, qwen_hidden_size)
-            self.decoder_projector = nn.Linear(qwen_hidden_size, self.context_dim)
+            self.qwen_model_input_projector = nn.Linear(self.context_dim, qwen_hidden_size)
+            self.qwen_model_output_projector = nn.Linear(qwen_hidden_size, self.context_dim)
 
         if self.config.model.enc_mup_width is not None:
             enc_width = self.config.model.enc_mup_width
@@ -723,8 +723,8 @@ class FlowMo(nn.Module):
             )
             code = quantized
 
-            qwen_last_hidden_state = self.qwen_model(inputs_embeds=self.encoder_projector(quantized), output_hidden_states=True).hidden_states[-1]
-            qwen_logits = self.decoder_projector(qwen_last_hidden_state)
+            qwen_last_hidden_state = self.qwen_model(inputs_embeds=self.qwen_model_input_projector(quantized), output_hidden_states=True).hidden_states[-1]
+            qwen_logits = self.qwen_model_output_projector(qwen_last_hidden_state)
             # Transform targets from {-1, 1} to {0, 1}
             targets = (quantized.detach()[:, 1:] + 1) / 2
             qwen_bce_loss = self.config.model.qwen_bce_loss_weight * F.binary_cross_entropy_with_logits(qwen_logits[:, :-1], targets)

@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --account=viscam
 #SBATCH --partition=viscam
-#SBATCH --gres=gpu:l40s:2
-#SBATCH --time=1440
-#SBATCH --cpus-per-task=32
-#SBATCH --job-name=lfq_hi
+#SBATCH --gres=gpu:l40s:4
+#SBATCH --time=2880
+#SBATCH --cpus-per-task=64
+#SBATCH --job-name=tar50x.01
 #SBATCH --output=%j_output.txt
 #SBATCH --error=%j_error.txt
 
@@ -24,13 +24,14 @@ conda activate FlowMo
 MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
-torchrun --nproc-per-node=2 --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_lfq_qwen_hi_pretrain" \
+torchrun --nproc-per-node=4 --master_port=$MASTER_PORT -m flowmo.train \
+    --experiment-name "flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.01_pretrain" \
     model.context_dim=56 model.codebook_size_for_entropy=14 model.quantization_type="lfq_qwen" \
     model.patch_size=8 model.mup_width=4 \
-    model.qwen_bce_loss_weight=0.001 \
+    model.qwen_bce_loss_weight=0.01 \
     opt.n_grad_acc=2 \
-    opt.lr=0.000025 \
+    opt.lr=0.0000125 \
+    opt.qwen_lr=0.000625 \
     trainer.max_steps=800000 \
     trainer.checkpoint_every=10000 \
     trainer.keep_every=10000

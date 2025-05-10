@@ -41,6 +41,7 @@ model:
 opt:
   # Floats need to be specified with decimals to get loaded as such
   lr: 1.0e-4
+  qwen_lr: 5.0e-3
   n_grad_acc: 2
   schedule: fat_lognormal
   freeze_encoder: False
