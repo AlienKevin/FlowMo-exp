@@ -1,0 +1,93 @@
+global_seed: 0
+
+data:
+  batch_size: 16
+  eval_batch_size: 5
+  image_size: 256
+  num_workers: 8
+
+  imagenet_train_index: "imagenet_train_index_overall.json"
+  imagenet_train_tar: "/svl/u/ksarge/ILSVRC2012_img_train.tar"
+  imagenet_val_index: "imagenet_val_index_overall.json"
+  imagenet_val_tar: "/svl/u/ksarge/ILSVRC2012_img_val.tar"
+
+model:
+  enable_mup: True
+  patch_size: 8
+  mup_width: 4
+  enc_mup_width: 4
+
+  fix_initial_norms: True
+  fix_norm_mode: l2
+
+  quantization_type: lfq
+  code_length: 256
+  context_dim: 56
+  codebook_size_for_entropy: 14
+  entropy_loss_weight: 0.0025
+  commit_loss_weight: 0.000625
+  qwen_bce_loss_weight: 0.001
+
+  enc_depth: 8
+  dec_depth: 16
+  enable_cfg: True
+
+  ema_decay: 0.9999
+
+  posttrain_sample: False
+  posttrain_sample_enable_cfg: False
+  posttrain_sample_k: 8
+
+opt:
+  # Floats need to be specified with decimals to get loaded as such
+  lr: 1.0e-4
+  qwen_lr: 5.0e-3
+  n_grad_acc: 2
+  schedule: fat_lognormal
+  freeze_encoder: False
+  freeze_encoder_after: 200000
+  weight_decay: 0.0
+  log_norms: True
+  lpips_weight: 0.1
+  lpips_mode: "vgg"
+
+  beta1: .9
+  beta2: .95
+
+trainer:
+  enable_bfloat16: True
+  log_every: 100
+  checkpoint_every: 5000
+  max_steps: 10000000000000
+  keep_every: 200000
+  gs_checkpoint_bucket: ""
+
+eval:
+  reconstruction: True
+  state_dict_key: model_ema_state_dict
+  eval_dir: ""
+  eval_baseline: ""
+  continuous: True
+  force_ckpt_path: null
+  subsample_rate: 1
+  
+  sampling:
+    sample_steps: 25
+    schedule: "pow_0.25"
+    cfg: 1.5
+    mode: 'rf'
+    cfg_interval: "(.17,1.02)"
+
+qwen_train:
+  qwen_model_name: "Qwen/Qwen3-0.6B-Base"
+  learning_rate: 5e-5
+  epochs: 4
+  qwen_seq_len: 1024
+  qwen_max_seq_length: 1024
+  use_bfloat16: True
+  save_interval: 1
+  # checkpoint_dir: "./results/flowmo_lfq_qwen_hi_all_sg_50xlr_bce_0.01_pretrain/"
+  # flowmo_ckpt_path: "./results/flowmo_lfq_qwen_hi_all_sg_50xlr_bce_0.01_pretrain/checkpoints/00200000.pth"
+  checkpoint_dir: "./results/flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain/"
+  flowmo_ckpt_path: "./results/flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain/checkpoints/00200000.pth"
+  steps_per_epoch: 10000
