@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=viscam
 #SBATCH --partition=viscam
-#SBATCH --gres=gpu:l40s:8
+#SBATCH --gres=gpu:l40s:2
 #SBATCH --time=360
 #SBATCH --cpus-per-task=128
 #SBATCH --job-name=eval
@@ -24,10 +24,11 @@ conda activate FlowMo
 MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
-torchrun --nproc-per-node=8 -m flowmo.evaluate \
-    --experiment-name "flowmo_lo_posttrain_eval" \
-    eval.eval_dir=results/flowmo_lo_posttrain \
+torchrun --nproc-per-node=2 -m flowmo.evaluate \
+    --experiment-name "flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain_eval" \
+    eval.eval_dir=results/flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain \
     eval.continuous=false \
-    eval.force_ckpt_path='flowmo_lo.pth' \
-    model.context_dim=18 model.codebook_size_for_entropy=9 \
-    model.patch_size=4 model.mup_width=6
+    eval.subsample_rate=10 \
+    eval.force_ckpt_path='results/flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain/checkpoints/00200000.pth' \
+    model.context_dim=56 model.codebook_size_for_entropy=14 \
+    model.patch_size=8 model.mup_width=4

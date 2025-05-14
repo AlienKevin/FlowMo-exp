@@ -392,7 +392,9 @@ def main(args, config):
         model = train_utils.build_model(config)
         state_dict = train_utils.load_state_dict(checkpoint_path)
         total_steps = state_dict["total_steps"]
-        model.load_state_dict(state_dict[config.eval.state_dict_key])
+        load_result = model.load_state_dict(state_dict[config.eval.state_dict_key], strict=False)
+        if load_result.unexpected_keys:
+            print(f"WARNING: Ignored unexpected keys in checkpoint: {load_result.unexpected_keys}")
 
         images, metrics = eval_imagenet(model, config)
         print(metrics)
