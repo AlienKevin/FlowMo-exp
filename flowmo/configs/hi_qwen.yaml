@@ -86,8 +86,8 @@ qwen_train:
   qwen_max_seq_length: 1024
   use_bfloat16: True
   save_interval: 1
-  # checkpoint_dir: "./results/flowmo_lfq_qwen_hi_all_sg_50xlr_bce_0.01_pretrain/"
-  # flowmo_ckpt_path: "./results/flowmo_lfq_qwen_hi_all_sg_50xlr_bce_0.01_pretrain/checkpoints/00200000.pth"
-  checkpoint_dir: "./results/flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain/"
-  flowmo_ckpt_path: "./results/flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain/checkpoints/00200000.pth"
+  checkpoint_dir: "./results/flowmo_lfq_qwen_hi_all_sg_50xlr_bce_0.01_pretrain/"
+  flowmo_ckpt_path: "./results/flowmo_lfq_qwen_hi_all_sg_50xlr_bce_0.01_pretrain/checkpoints/00200000.pth"
+  # checkpoint_dir: "./results/flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain/"
+  # flowmo_ckpt_path: "./results/flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain/checkpoints/00200000.pth"
   steps_per_epoch: 10000

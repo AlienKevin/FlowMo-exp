@@ -2,7 +2,7 @@
 """
 Training script for Qwen on visual tokens from FlowMo encoder.
 """
-from unsloth import FastLanguageModel
+from unsloth import FastLanguageModel, add_new_tokens
 from flowmo import models, train_utils
 import os
 import torch
@@ -28,17 +28,7 @@ def get_visual_tokens(flowmo_model: models.FlowMo, images: torch.Tensor, device:
         # Unflatten indices
         indices = indices.view(images.size(0), -1)
 
-    # quant_aux usually contains 'quantizer_loss'.
-    # If quantizer_loss is a tensor, take its mean. If it's already a float, use as is.
-    quantizer_loss_val = 0.0
-    if 'quantizer_loss' in quant_aux:
-        ql = quant_aux['quantizer_loss']
-        if isinstance(ql, torch.Tensor):
-            quantizer_loss_val = ql.mean().item()
-        else:
-            quantizer_loss_val = float(ql)
-            
-    return indices, quantizer_loss_val
+    return indices
 
 
 def load_qwen_model_and_tokenizer(model_name: str, num_new_visual_tokens: int, device: torch.device, config: DictConfig):
@@ -56,8 +46,7 @@ def load_qwen_model_and_tokenizer(model_name: str, num_new_visual_tokens: int, d
     
     print(f"Original Qwen vocab size: {len(tokenizer)}")
     new_tokens = [f"<VISUAL_{i}>" for i in range(num_new_visual_tokens)]
-    tokenizer.add_tokens(new_tokens)
-    model.resize_token_embeddings(len(tokenizer)) # Adjust model's embedding layer
+    add_new_tokens(model, tokenizer, new_tokens=new_tokens)
     print(f"Extended Qwen vocab size: {len(tokenizer)}")
     
     model.to(device)
@@ -146,7 +135,7 @@ def train_qwen_on_visual_tokens(config: DictConfig):
             
             # A. Get visual tokens from FlowMo
             # visual_indices: (batch_size, num_tokens_per_image), values from 0 to (2^S - 1)
-            visual_indices, avg_quant_loss_batch = get_visual_tokens(flowmo_encoder, images, device)
+            visual_indices = get_visual_tokens(flowmo_encoder, images, device)
             
             # Map LFQ indices to Qwen's new visual token IDs
             # visual_token_ids: (batch_size, num_tokens_per_image)
@@ -179,7 +168,6 @@ def train_qwen_on_visual_tokens(config: DictConfig):
 
             # Log metrics to TensorBoard
             writer.add_scalar('train/qwen_ce_loss', lm_loss.item(), total_steps)
-            writer.add_scalar('train/quantizer_loss', avg_quant_loss_batch, total_steps)
 
         avg_epoch_lm_loss = total_lm_loss_epoch / (num_images_in_dataset * (visual_token_ids.shape[1] // config.qwen_train.qwen_seq_len if visual_token_ids.shape[1]>0 else 1) if num_images_in_dataset >0 and visual_token_ids.shape[1]>0 else 1) # also rough
         print(f"Epoch {epoch+1} finished. Average Qwen LM Loss for epoch: {avg_epoch_lm_loss:.4f}")
