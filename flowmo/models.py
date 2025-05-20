@@ -806,6 +806,8 @@ class FlowMo(nn.Module):
         model = self
         config = self.config.eval.sampling
 
+        has_code_input = code is not None
+
         with torch.autocast(
             "cuda",
             dtype=dtype,
@@ -815,6 +817,7 @@ class FlowMo(nn.Module):
                 x = images.cuda()
                 prequantized_code = model.encode(x)[0].cuda()
                 code, _, _ = model._quantize(prequantized_code)
+                quantized = code.clone()
 
             z = torch.randn((bs, 3, h, w)).cuda()
 
@@ -833,7 +836,10 @@ class FlowMo(nn.Module):
                 cfg=config.cfg,
                 schedule=config.schedule,
             )[-1].clip(-1, 1)
-        return samples.to(torch.float32)
+        if not has_code_input:
+            return samples.to(torch.float32), quantized
+        else:
+            return samples.to(torch.float32)
 
 
 def rf_loss(config, model, batch, aux_state):
