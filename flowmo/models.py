@@ -19,6 +19,7 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 
 from flowmo import lookup_free_quantize
+from flowmo.larp import LARPQuantizer
 
 MUP_ENABLED = True
 
@@ -548,6 +549,8 @@ class FlowMo(nn.Module):
                 num_codebooks=1,
                 token_factorization=False,
             )
+        elif config.model.quantization_type == 'larp':
+            self.quantizer = LARPQuantizer(self.config)
         elif config.model.quantization_type == 'lfq_qwen':
             self.quantizer = lookup_free_quantize.LFQ(
                 codebook_size=2**self.config.model.codebook_size_for_entropy,
@@ -729,6 +732,10 @@ class FlowMo(nn.Module):
             targets = (quantized.detach()[:, 1:] + 1) / 2
             qwen_bce_loss = self.config.model.qwen_bce_loss_weight * F.binary_cross_entropy_with_logits(qwen_logits[:, :-1], targets)
             aux = {"quantizer_loss": quantizer_loss, "qwen_bce_loss": qwen_bce_loss}
+        elif self.config.model.quantization_type == "larp":
+            quantized, indices, larp_losses = self.quantizer(code, return_loss_breakdown=True)
+            code = quantized # Use the straight-through version
+            aux = larp_losses
         else:
             raise NotImplementedError
         return code, indices, aux

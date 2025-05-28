@@ -25,10 +25,10 @@ MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
 torchrun --nproc-per-node=2 --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain" \
+    --experiment-name "flowmo_lfq_qwen_hi_targets_sg_50xlr_ce_0.006_pretrain" \
     model.context_dim=56 model.codebook_size_for_entropy=14 model.quantization_type="lfq_qwen" \
     model.patch_size=8 model.mup_width=4 \
-    model.qwen_bce_loss_weight=0.006 \
+    model.qwen_ce_loss_weight=0.006 \
     opt.n_grad_acc=2 \
     opt.lr=0.000025 \
     opt.qwen_lr=0.00125 \

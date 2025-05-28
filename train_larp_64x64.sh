@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --account=viscam
 #SBATCH --partition=viscam
-#SBATCH --gres=gpu:l40s:1
-#SBATCH --time=720
+#SBATCH --gres=gpu:h200:1
+#SBATCH --time=1440
 #SBATCH --cpus-per-task=16
-#SBATCH --job-name=larp
+#SBATCH --job-name=64x64
 #SBATCH --output=%j_output.txt
 #SBATCH --error=%j_error.txt
 
@@ -24,13 +24,15 @@ conda activate FlowMo
 MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
-batch_size=8
-
-torchrun --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_larp_real_quantized_batch_size_${batch_size}_pretrain" \
+torchrun --nproc-per-node=1 --master_port=$MASTER_PORT -m flowmo.train \
+    --experiment-name "flowmo_hi_larp_64x64_pretrain" \
     model.context_dim=56 model.codebook_size_for_entropy=14 model.quantization_type="larp" \
-    data.batch_size=${batch_size} \
-    model.qwen_ce_loss_weight=0.1 \
+    model.patch_size=4 model.mup_width=4 model.code_length=64 \
+    data.batch_size=128 \
+    data.eval_batch_size=40 \
+    data.image_size=64 \
+    opt.n_grad_acc=1 \
+    opt.lr=0.0001 \
     trainer.max_steps=800000 \
-    trainer.checkpoint_every=5000 \
-    trainer.keep_every=5000
+    trainer.checkpoint_every=20000 \
+    trainer.keep_every=20000

@@ -136,12 +136,12 @@ def main(args, config):
         "params": [p for (n, p) in model.named_parameters() if "decoder" in n],
         "lr": config.opt.lr,
     }
-    qwen_pg = {
-        "params": [p for (n, p) in model.named_parameters() if ("qwen_model" in n) and (("qwen_model_input_projector" in n) or ("qwen_model_output_projector" in n))],
-        "lr": config.opt.qwen_lr,
+    prior_pg = {
+        "params": [p for (n, p) in model.named_parameters() if "prior_model" in n],
+        "lr": config.opt.lr * config.prior.lr_multiplier,
     }
-    # all_params = set(p for n, p in model.named_parameters())
-    # assert set(encoder_pg["params"]).union(set(decoder_pg["params"])).union(set(qwen_pg["params"])) == all_params
+    all_params = set(p for n, p in model.named_parameters())
+    assert set(encoder_pg["params"]).union(set(decoder_pg["params"])).union(set(prior_pg["params"])) == all_params
 
     def build_optimizer(pgs):
         optimizer = opt_cls(
@@ -151,7 +151,7 @@ def main(args, config):
         )
         return optimizer
 
-    optimizer = build_optimizer([encoder_pg, decoder_pg, qwen_pg])
+    optimizer = build_optimizer([encoder_pg, decoder_pg, prior_pg])
     rebuilt_optimizer = False
 
     train_dataloader = train_utils.load_dataset(config, split='train')

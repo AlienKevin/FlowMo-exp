@@ -38,10 +38,16 @@ model:
   posttrain_sample_enable_cfg: False
   posttrain_sample_k: 8
 
+prior:
+  model_name: gptc-S
+  lr_multiplier: 50
+  loss_weight: 0.06
+  use_mix_ss: False
+  mix_ss_max_ratio: 0.5
+
 opt:
   # Floats need to be specified with decimals to get loaded as such
   lr: 1.0e-4
-  qwen_lr: 5.0e-3
   n_grad_acc: 2
   schedule: fat_lognormal
   freeze_encoder: False
