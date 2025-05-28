@@ -13,7 +13,7 @@ class LARPQuantizer(nn.Module):
         # Stochastic Vector Quantizer (SVQ)
         self.vq = VectorQuantize(
             dim=config.model.context_dim,
-            codebook_size=config.model.codebook_size_for_entropy,
+            codebook_size=2**self.config.model.codebook_size_for_entropy,
             codebook_dim=config.model.context_dim,
             heads=1,
             separate_codebook_per_head=False,
@@ -147,7 +147,7 @@ class LARPQuantizer(nn.Module):
         }
         if return_loss_breakdown and vq_loss_breakdown:
             losses["vq_commitment_loss_breakdown"] = vq_loss_breakdown.commitment
-            if hasattr(vq_loss_breakdown, 'codebook_diversity'): # older vector_quantize might not have it
+            if hasattr(vq_loss_breakdown, 'codebook_diversity'):
                  losses["vq_codebook_diversity_loss_breakdown"] = vq_loss_breakdown.codebook_diversity
             if hasattr(vq_loss_breakdown, 'orthogonal_reg'):
                  losses["vq_orthogonal_reg_loss_breakdown"] = vq_loss_breakdown.orthogonal_reg
