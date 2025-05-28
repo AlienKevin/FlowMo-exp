@@ -3,7 +3,7 @@
 #SBATCH --partition=viscam
 #SBATCH --gres=gpu:h200:1
 #SBATCH --time=1440
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --job-name=64x64
 #SBATCH --output=%j_output.txt
 #SBATCH --error=%j_error.txt

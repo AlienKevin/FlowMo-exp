@@ -12,9 +12,9 @@ class LARPQuantizer(nn.Module):
 
         # Stochastic Vector Quantizer (SVQ)
         self.vq = VectorQuantize(
-            dim=config.model.context_dim,
+            dim=self.config.model.codebook_size_for_entropy,
             codebook_size=2**self.config.model.codebook_size_for_entropy,
-            codebook_dim=config.model.context_dim,
+            codebook_dim=self.config.model.codebook_size_for_entropy,
             heads=1,
             separate_codebook_per_head=False,
             use_cosine_sim=True,
@@ -34,7 +34,7 @@ class LARPQuantizer(nn.Module):
         # and other prior-specific settings.
         # Example: config.prior = edict(n_embd=256, n_head=8, n_layer=6, ...)
         prior_config = config.prior
-        self.prior_model = GPTC_models[prior_config.model_name](n_ind=config.model.context_dim)
+        self.prior_model = GPTC_models[prior_config.model_name](n_ind=self.config.model.codebook_size_for_entropy)
 
         self.prior_loss_weight = prior_config.loss_weight
         self.use_mix_ss = prior_config.use_mix_ss
@@ -146,11 +146,10 @@ class LARPQuantizer(nn.Module):
             "prior_loss": total_prior_loss,
         }
         if return_loss_breakdown and vq_loss_breakdown:
-            losses["vq_commitment_loss_breakdown"] = vq_loss_breakdown.commitment
-            if hasattr(vq_loss_breakdown, 'codebook_diversity'):
-                 losses["vq_codebook_diversity_loss_breakdown"] = vq_loss_breakdown.codebook_diversity
-            if hasattr(vq_loss_breakdown, 'orthogonal_reg'):
-                 losses["vq_orthogonal_reg_loss_breakdown"] = vq_loss_breakdown.orthogonal_reg
+            losses["vq_commitment"] = vq_loss_breakdown.commitment
+            losses["vq_codebook_diversity"] = vq_loss_breakdown.codebook_diversity
+            losses["vq_orthogonal"] = vq_loss_breakdown.orthogonal_reg
+            losses["vq_codebook_usage"] = torch.tensor(indices.unique().numel() / self.vq.codebook_size * 100)
         
         # The final "code" to be returned should be the output of SVQ that has gradients
         # which is `quantized_sg`

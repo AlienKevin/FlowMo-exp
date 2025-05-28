@@ -733,9 +733,16 @@ class FlowMo(nn.Module):
             qwen_bce_loss = self.config.model.qwen_bce_loss_weight * F.binary_cross_entropy_with_logits(qwen_logits[:, :-1], targets)
             aux = {"quantizer_loss": quantizer_loss, "qwen_bce_loss": qwen_bce_loss}
         elif self.config.model.quantization_type == "larp":
-            quantized, indices, larp_losses = self.quantizer(code, return_loss_breakdown=True)
+            assert f % self.config.model.codebook_size_for_entropy == 0, f
+            code = einops.rearrange(
+                code,
+                "b t (fg fh) -> b (t fh) fg",
+                fg=self.config.model.codebook_size_for_entropy,
+            )
+            quantized, indices, aux = self.quantizer(code, return_loss_breakdown=True)
+            assert quantized.shape == code.shape
+            quantized = einops.rearrange(quantized, "b (t fh) fg -> b t (fg fh)", t=t)
             code = quantized # Use the straight-through version
-            aux = larp_losses
         else:
             raise NotImplementedError
         return code, indices, aux
@@ -903,10 +910,11 @@ def rf_loss(config, model, batch, aux_state):
 
     aux["loss_dict"]["total_loss"] = sum(aux["loss_dict"].values())
 
-    # Log other metrics
-    for k in aux.keys():
-        if k.endswith('loss_breakdown'):
-            aux["loss_dict"][k] = aux[k]
+    # Copy over other metrics
+    for key, value in aux.items():
+        if key != 'loss_dict' and key not in aux["loss_dict"] and \
+            (isinstance(value, torch.Tensor) and value.numel() == 1):
+            aux["loss_dict"][key] = value
 
     return aux["loss_dict"]["total_loss"], aux
 
