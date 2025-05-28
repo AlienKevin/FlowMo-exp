@@ -902,6 +902,12 @@ def rf_loss(config, model, batch, aux_state):
         aux["loss_dict"]["lpips_loss"] = lpips_dist
 
     aux["loss_dict"]["total_loss"] = sum(aux["loss_dict"].values())
+
+    # Log other metrics
+    for k in aux.keys():
+        if k.endswith('loss_breakdown'):
+            aux["loss_dict"][k] = aux[k]
+
     return aux["loss_dict"]["total_loss"], aux
 
 
