@@ -706,6 +706,11 @@ class FlowMo(nn.Module):
             )
             code = quantized
             aux = {"quantizer_loss": quantizer_loss}
+            aux["vq_commitment"] = breakdown.commitment
+            aux["vq_entropy"] = entropy_aux_loss
+            aux["vq_per_sample_entropy"] = breakdown.per_sample_entropy
+            aux["vq_codebook_entropy"] = breakdown.codebook_entropy
+            aux["vq_codebook_usage"] = torch.tensor(indices.unique().numel() / self.quantizer.codebook_size * 100)
         elif self.config.model.quantization_type == "lfq_qwen":
             assert f % self.config.model.codebook_size_for_entropy == 0, f
             code = einops.rearrange(
