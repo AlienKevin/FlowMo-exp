@@ -147,15 +147,7 @@ class GPTC(nn.Module):
         x = self.ln_f(x)
         pred = self.head(x) # (b, n, n_ind)
 
-        # if we are given some desired targets also calculate the loss
-        loss = None
-        if targets is not None:
-            if self.diff_loss:
-                loss = self.diff_loss_module.loss(pred, targets)
-            else:
-                loss = F.mse_loss(pred, targets)
-
-        return pred, loss
+        return pred
     
     def compute_prior_loss(self, x: torch.Tensor) -> torch.Tensor:
         # x: (b, n, n_ind) 

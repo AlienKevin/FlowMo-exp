@@ -89,7 +89,7 @@ class LARPQuantizer(nn.Module):
         # Get v_bar from prior model
         # The GPTC model's forward pass takes (x, targets=None).
         # We don't use its internal loss.
-        v_bar_predicted, _ = self.prior_model(prior_input) # v_bar_predicted: [B, seq_len-1, codebook_dim]
+        v_bar_predicted = self.prior_model(prior_input) # v_bar_predicted: [B, seq_len-1, codebook_dim]
         
         # 4. Calculate NLL loss (Lprior)
         # s = (v_bar_predicted @ self.vq.codebook.t()) / (torch.norm(v_bar_predicted, dim=-1, keepdim=True) * torch.norm(self.vq.codebook, dim=-1, keepdim=True).t())
@@ -127,7 +127,7 @@ class LARPQuantizer(nn.Module):
             mixed_prior_input_token_embeddings = torch.where(mask, predicted_Z_hat_first_pass, prior_input) # prior_input is Z_hat[:, :-1, :]
             
             # Second forward pass with mixed input
-            v_bar_predicted_ss, _ = self.prior_model(mixed_prior_input_token_embeddings)
+            v_bar_predicted_ss = self.prior_model(mixed_prior_input_token_embeddings)
             
             v_bar_norm_ss = F.normalize(v_bar_predicted_ss, p=2, dim=-1)
             logits_s_ss = torch.einsum('btd,cd->btc', v_bar_norm_ss, codebook_norm)
