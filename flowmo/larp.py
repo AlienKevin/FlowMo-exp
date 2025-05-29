@@ -34,7 +34,23 @@ class LARPQuantizer(nn.Module):
         # and other prior-specific settings.
         # Example: config.prior = edict(n_embd=256, n_head=8, n_layer=6, ...)
         prior_config = config.prior
-        self.prior_model = GPTC_models[prior_config.model_name](n_ind=self.config.model.codebook_size_for_entropy)
+        if prior_config.model_name.startswith('Qwen'):
+            from transformers import AutoModelForCausalLM, AutoConfig, Qwen3ForCausalLM
+
+            model_id = f'Qwen/{prior_config.model_name}'
+
+            self.prior_model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype="auto",
+            ).to('cuda:0')
+
+            # # # Randomly initialized model
+            # self.prior_model = Qwen3ForCausalLM(AutoConfig.from_pretrained(model_id))
+
+            self.prior_model_project_in = nn.Linear(self.config.model.codebook_size_for_entropy, self.prior_model.config.hidden_size)
+            self.prior_model_project_out = nn.Linear(self.prior_model.config.hidden_size, self.config.model.codebook_size_for_entropy)
+        elif prior_config.model_name.startswith('gptc'):
+            self.prior_model = GPTC_models[prior_config.model_name](n_ind=self.config.model.codebook_size_for_entropy)
 
         self.prior_loss_weight = prior_config.loss_weight
         self.use_mix_ss = prior_config.use_mix_ss
@@ -89,7 +105,12 @@ class LARPQuantizer(nn.Module):
         # Get v_bar from prior model
         # The GPTC model's forward pass takes (x, targets=None).
         # We don't use its internal loss.
-        v_bar_predicted = self.prior_model(prior_input) # v_bar_predicted: [B, seq_len-1, codebook_dim]
+        if self.config.prior.model_name.startswith('Qwen'):
+            prior_input = self.prior_model_project_in(prior_input)
+            prior_output = self.prior_model(inputs_embeds=prior_input, output_hidden_states=True).hidden_states[-1] # v_bar_predicted: [B, seq_len-1, codebook_dim]
+            v_bar_predicted = self.prior_model_project_out(prior_output)
+        elif self.config.prior.model_name.startswith('gptc'):
+            v_bar_predicted = self.prior_model(prior_input) # v_bar_predicted: [B, seq_len-1, codebook_dim]
         
         # 4. Calculate NLL loss (Lprior)
         # s = (v_bar_predicted @ self.vq.codebook.t()) / (torch.norm(v_bar_predicted, dim=-1, keepdim=True) * torch.norm(self.vq.codebook, dim=-1, keepdim=True).t())
