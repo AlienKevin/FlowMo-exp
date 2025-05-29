@@ -218,7 +218,7 @@ def eval_imagenet(model, config):
         # run normal evaluation
         dtype = torch.bfloat16 if train_utils.bfloat16_is_available() else torch.float32
         print(dtype)
-        reconstruct_fn = functools.partial(model.reconstruct, dtype=dtype)
+        reconstruct_fn = lambda x: model.reconstruct(x, dtype=dtype)[0]
     else:
         raise NotImplementedError
 
