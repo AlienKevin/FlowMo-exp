@@ -14,7 +14,7 @@ import einops
 import torch
 from einops import rearrange, repeat
 from mup import MuReadout
-from unsloth import FastLanguageModel
+# from unsloth import FastLanguageModel
 from torch import Tensor, nn
 import torch.nn.functional as F
 

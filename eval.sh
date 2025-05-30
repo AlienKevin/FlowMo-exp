@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --account=viscam
 #SBATCH --partition=viscam
-#SBATCH --gres=gpu:l40s:2
+#SBATCH --gres=gpu:h200:1
 #SBATCH --time=360
-#SBATCH --cpus-per-task=128
+#SBATCH --cpus-per-task=32
 #SBATCH --job-name=eval
 #SBATCH --output=%j_output.txt
 #SBATCH --error=%j_error.txt
@@ -24,11 +24,14 @@ conda activate FlowMo
 MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
-torchrun --nproc-per-node=2 -m flowmo.evaluate \
-    --experiment-name "flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain_eval" \
-    eval.eval_dir=results/flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain \
+torchrun --nproc-per-node=1 -m flowmo.evaluate \
+    --experiment-name "flowmo_hi_larp_qwen3_0.6b_64x64_pretrain_eval" \
+    eval.eval_dir=results/flowmo_hi_larp_qwen3_0.6b_64x64_pretrain \
     eval.continuous=false \
     eval.subsample_rate=10 \
-    eval.force_ckpt_path='results/flowmo_lfq_qwen_hi_targets_sg_50xlr_bce_0.006_pretrain/checkpoints/00200000.pth' \
-    model.context_dim=56 model.codebook_size_for_entropy=14 \
-    model.patch_size=8 model.mup_width=4
+    eval.force_ckpt_path='results/flowmo_hi_larp_qwen3_0.6b_64x64_pretrain/checkpoints/00080000.pth' \
+    model.context_dim=56 model.codebook_size_for_entropy=14 model.quantization_type="larp" \
+    model.patch_size=4 model.mup_width=4 model.code_length=64 \
+    prior.model_name="Qwen3-0.6B" \
+    data.eval_batch_size=500 \
+    data.image_size=64
