@@ -19,6 +19,7 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 
 from flowmo import lookup_free_quantize
+from flowmo import ibq
 from flowmo.larp import LARPQuantizer
 
 MUP_ENABLED = True
@@ -549,6 +550,11 @@ class FlowMo(nn.Module):
                 num_codebooks=1,
                 token_factorization=False,
             )
+        elif config.model.quantization_type == 'ibq':
+            self.quantizer = ibq.IndexPropagationQuantize(
+                codebook_size=2**self.config.model.codebook_size_for_entropy,
+                e_dim=self.config.model.codebook_size_for_entropy,
+            )
         elif config.model.quantization_type == 'larp':
             self.quantizer = LARPQuantizer(self.config)
         elif config.model.quantization_type == 'lfq_qwen':
@@ -710,6 +716,31 @@ class FlowMo(nn.Module):
             aux["vq_entropy"] = entropy_aux_loss
             aux["vq_per_sample_entropy"] = breakdown.per_sample_entropy
             aux["vq_codebook_entropy"] = breakdown.codebook_entropy
+            aux["vq_codebook_usage"] = torch.tensor(indices.unique().numel() / self.quantizer.codebook_size * 100)
+        elif self.config.model.quantization_type == "ibq":
+            assert f % self.config.model.codebook_size_for_entropy == 0, f
+            code = einops.rearrange(
+                code,
+                "b t (fg fh) -> b fg (t fh)",
+                fg=self.config.model.codebook_size_for_entropy,
+            )
+
+            quantized, (commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices = self.quantizer(code)
+            assert quantized.shape == code.shape
+            quantized = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
+
+            quantizer_loss = (
+                entropy_aux_loss * self.config.model.entropy_loss_weight
+                + commit_loss * self.config.model.commit_loss_weight
+                + double_quant_loss * self.config.model.commit_loss_weight
+            )
+            code = quantized
+            aux = {"quantizer_loss": quantizer_loss}
+            aux["vq_commitment"] = commit_loss
+            aux["vq_double_quantization"] = double_quant_loss
+            aux["vq_entropy"] = entropy_aux_loss
+            aux["vq_per_sample_entropy"] = per_sample_entropy
+            aux["vq_codebook_entropy"] = codebook_entropy
             aux["vq_codebook_usage"] = torch.tensor(indices.unique().numel() / self.quantizer.codebook_size * 100)
         elif self.config.model.quantization_type == "lfq_qwen":
             assert f % self.config.model.codebook_size_for_entropy == 0, f

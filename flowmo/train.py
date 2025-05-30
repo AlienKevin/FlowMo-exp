@@ -140,8 +140,12 @@ def main(args, config):
         "params": [p for (n, p) in model.named_parameters() if "prior_model" in n],
         "lr": config.opt.lr * config.prior.lr_multiplier,
     }
+    quantizer_pg = {
+        "params": [p for (n, p) in model.named_parameters() if "quantizer" in n],
+        "lr": config.opt.lr,
+    }
     all_params = set(p for n, p in model.named_parameters())
-    assert set(encoder_pg["params"]).union(set(decoder_pg["params"])).union(set(prior_pg["params"])) == all_params
+    assert set(encoder_pg["params"]).union(set(decoder_pg["params"])).union(set(prior_pg["params"])).union(set(quantizer_pg["params"])) == all_params
 
     def build_optimizer(pgs):
         optimizer = opt_cls(
@@ -151,7 +155,7 @@ def main(args, config):
         )
         return optimizer
 
-    optimizer = build_optimizer([encoder_pg, decoder_pg, prior_pg])
+    optimizer = build_optimizer([encoder_pg, decoder_pg, prior_pg, quantizer_pg])
     rebuilt_optimizer = False
 
     train_dataloader = train_utils.load_dataset(config, split='train')
