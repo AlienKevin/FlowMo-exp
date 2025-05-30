@@ -1,8 +1,6 @@
-2xh200_2corecpu_results/
-4xa5000_results/
+samples/
 old_results/
 results/
-n01440764/
 __pycache__/
 *.tar
 *.json
