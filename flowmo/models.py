@@ -19,8 +19,7 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 
 from flowmo import lookup_free_quantize
-from flowmo import ibq
-from flowmo.larp import LARPQuantizer
+from flowmo import ibq, larp, larp_ibq
 
 MUP_ENABLED = True
 
@@ -555,8 +554,10 @@ class FlowMo(nn.Module):
                 codebook_size=2**self.config.model.codebook_size_for_entropy,
                 e_dim=self.config.model.codebook_size_for_entropy,
             )
+        elif config.model.quantization_type == 'larp_ibq':
+            self.quantizer = larp_ibq.LARPQuantizer(self.config)
         elif config.model.quantization_type == 'larp':
-            self.quantizer = LARPQuantizer(self.config)
+            self.quantizer = larp.LARPQuantizer(self.config)
         elif config.model.quantization_type == 'lfq_qwen':
             self.quantizer = lookup_free_quantize.LFQ(
                 codebook_size=2**self.config.model.codebook_size_for_entropy,
@@ -736,6 +737,33 @@ class FlowMo(nn.Module):
             )
             code = quantized
             aux = {"quantizer_loss": quantizer_loss}
+            aux["vq_commitment"] = commit_loss
+            aux["vq_double_quantization"] = double_quant_loss
+            aux["vq_entropy"] = entropy_aux_loss
+            aux["vq_per_sample_entropy"] = per_sample_entropy
+            aux["vq_codebook_entropy"] = codebook_entropy
+            aux["vq_codebook_usage"] = torch.tensor(indices.unique().numel() / self.quantizer.codebook_size * 100)
+        elif self.config.model.quantization_type == "larp_ibq":
+            assert f % self.config.model.codebook_size_for_entropy == 0, f
+            code = einops.rearrange(
+                code,
+                "b t (fg fh) -> b fg (t fh)",
+                fg=self.config.model.codebook_size_for_entropy,
+            )
+
+            quantized, (prior_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices = self.quantizer(code)
+            assert quantized.shape == code.shape
+            quantized = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
+
+            quantizer_loss = (
+                entropy_aux_loss * self.config.model.entropy_loss_weight
+                + commit_loss * self.config.model.commit_loss_weight
+                + double_quant_loss * self.config.model.commit_loss_weight
+                + prior_loss * self.config.prior.loss_weight
+            )
+            code = quantized
+            aux = {"quantizer_loss": quantizer_loss}
+            aux["prior_loss"] = prior_loss
             aux["vq_commitment"] = commit_loss
             aux["vq_double_quantization"] = double_quant_loss
             aux["vq_entropy"] = entropy_aux_loss

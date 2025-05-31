@@ -141,7 +141,7 @@ def main(args, config):
         "lr": config.opt.lr * config.prior.lr_multiplier,
     }
     quantizer_pg = {
-        "params": [p for (n, p) in model.named_parameters() if "quantizer" in n],
+        "params": [p for (n, p) in model.named_parameters() if ("quantizer" in n and "prior_model" not in n)],
         "lr": config.opt.lr,
     }
     all_params = set(p for n, p in model.named_parameters())
