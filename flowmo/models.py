@@ -751,7 +751,7 @@ class FlowMo(nn.Module):
                 fg=self.config.model.codebook_size_for_entropy,
             )
 
-            quantized, (prior_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices = self.quantizer(code)
+            quantized, (prior_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices = self.quantizer(code, prior_stop_grad=self.config.prior.stop_grad)
             assert quantized.shape == code.shape
             quantized = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
 

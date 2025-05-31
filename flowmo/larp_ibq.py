@@ -71,7 +71,7 @@ class LARPQuantizer(nn.Module):
         elif prior_config.model_name.startswith('gptc'):
             self.prior_model = GPTC_models[prior_config.model_name](n_ind=self.config.model.codebook_size_for_entropy)
 
-    def forward(self, x, stop_grad=True):
+    def forward(self, x, prior_stop_grad=True):
         # x: [batch_size, feature_dim, sequence_length]
         batch_size, feature_dim, seq_len = x.shape
         
@@ -79,13 +79,13 @@ class LARPQuantizer(nn.Module):
 
         # 2. De-quantize for AR Prior Input
         # self.quantizer.codebook is [codebook_size, codebook_dim]
-        codebook = self.quantizer.embedding.weight.detach() if stop_grad else self.quantizer.embedding.weight
+        codebook = self.quantizer.embedding.weight.detach() if prior_stop_grad else self.quantizer.embedding.weight
         
         # 3. Autoregressive Prior Model
         # Prior input: quantized shifted by one (predict next token)
         # Prior target: actual next token indices
-        prior_input = rearrange(quantized.detach() if stop_grad else quantized, "b d t -> b t d")[:, :-1, :]
-        prior_target_indices = indices.reshape(batch_size, seq_len)[:, 1:]
+        prior_input = rearrange(quantized.detach() if prior_stop_grad else quantized, "b d t -> b t d")[:, :-1, :]
+        prior_target_indices = (indices.detach() if prior_stop_grad else indices).reshape(batch_size, seq_len)[:, 1:]
 
         # Get v_bar from prior model
         if self.config.prior.model_name.startswith('Qwen'):
