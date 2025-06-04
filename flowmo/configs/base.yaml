@@ -40,8 +40,8 @@ model:
 
 prior:
   model_name: gptc-S
-  lr_multiplier: 50
-  loss_weight: 0.06
+  lr_multiplier: 100
+  loss_weight: 0.001
   stop_grad: True
   use_mix_ss: False
   mix_ss_max_ratio: 0.5

@@ -220,7 +220,7 @@ def main(args, config):
         if config.opt.freeze_encoder or total_steps >= config.opt.freeze_encoder_after:
             if not rebuilt_optimizer:
                 print(f"Rebuilding optimizer at step {total_steps}")
-                optimizer = build_optimizer([decoder_pg])
+                optimizer = build_optimizer([decoder_pg, prior_pg])
                 rebuilt_optimizer = True
                 model.module.encoder.requires_grad_(False)
                 model_ema.decay = config.model.ema_decay

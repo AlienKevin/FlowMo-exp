@@ -2,7 +2,7 @@
 #SBATCH --account=viscam
 #SBATCH --partition=viscam
 #SBATCH --gres=gpu:h200:1
-#SBATCH --time=1440
+#SBATCH --time=2880
 #SBATCH --cpus-per-task=32
 #SBATCH --job-name=64x64
 #SBATCH --output=%j_output.txt
@@ -25,15 +25,17 @@ MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
 torchrun --nproc-per-node=1 --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_hi_larp_qwen3_0.6b_2_64x64_pretrain" \
-    model.context_dim=56 model.codebook_size_for_entropy=14 model.quantization_type="larp" \
+    --experiment-name "flowmo_hi_larp_ibq_rand_sg_prior_0.001_multiplier_100_64x64_pretrain" \
+    model.context_dim=56 model.codebook_size_for_entropy=14 model.quantization_type="larp_ibq" \
     model.patch_size=4 model.mup_width=4 model.code_length=64 \
     prior.model_name="Qwen3-0.6B" \
+    prior.stop_grad=True \
     data.batch_size=128 \
     data.eval_batch_size=40 \
     data.image_size=64 \
     opt.n_grad_acc=1 \
     opt.lr=0.0001 \
-    trainer.max_steps=800000 \
+    opt.freeze_encoder_after=40000 \
+    trainer.max_steps=400000 \
     trainer.checkpoint_every=20000 \
     trainer.keep_every=20000

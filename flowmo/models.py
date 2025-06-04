@@ -759,11 +759,13 @@ class FlowMo(nn.Module):
                 entropy_aux_loss * self.config.model.entropy_loss_weight
                 + commit_loss * self.config.model.commit_loss_weight
                 + double_quant_loss * self.config.model.commit_loss_weight
-                + prior_loss * self.config.prior.loss_weight
             )
             code = quantized
-            aux = {"quantizer_loss": quantizer_loss}
-            aux["prior_loss"] = prior_loss
+            aux = {
+                "quantizer_loss": quantizer_loss,
+                "prior_loss": prior_loss * self.config.prior.loss_weight
+            }
+            aux["prior_loss_unweighted"] = prior_loss.detach()
             aux["vq_commitment"] = commit_loss
             aux["vq_double_quantization"] = double_quant_loss
             aux["vq_entropy"] = entropy_aux_loss
