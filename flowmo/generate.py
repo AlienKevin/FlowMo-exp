@@ -20,8 +20,13 @@ def find_latest_checkpoint(exp_dir: str):
 
 
 @torch.no_grad()
-def greedy_sample_code(model: models.FlowMo):
-    """Autoregressively samples quantized code tokens using the prior model with greedy decoding."""
+def sample_code(model: models.FlowMo, temperature: float = 0.0):
+    """Autoregressively samples quantized code tokens using the prior model.
+    
+    Args:
+        model: FlowMo model with quantizer and prior
+        temperature: Temperature for sampling. If 0, uses greedy decoding. If > 0, uses stochastic sampling.
+    """
     device = next(model.parameters()).device
     quantizer = model.quantizer  # LARPQuantizer
     base_quantizer = quantizer.quantizer  # IndexPropagationQuantize
@@ -53,16 +58,25 @@ def greedy_sample_code(model: models.FlowMo):
             # Qwen prior
             proj_in = quantizer.prior_model_project_in
             proj_out = quantizer.prior_model_project_out
-            hidden = quantizer.prior_model(inputs_embeds=proj_in(input_embeddings), output_hidden_states=True).hidden_states[-1]
+            hidden = quantizer.prior_model(inputs_embeds=proj_in(input_embeddings).to(torch.bfloat16), output_hidden_states=True).hidden_states[-1].to(torch.float)
             pred_embedding = proj_out(hidden[:, -1, :])  # (1, D)
         else:
             # GPT-C style prior
             pred_sequence = quantizer.prior_model(input_embeddings)  # (1, t, D)
             pred_embedding = pred_sequence[:, -1, :]  # (1, D)
 
-        # Greedy decoding: choose codebook entry with maximum dot-product similarity
+        # Sample next token based on temperature
         logits = torch.matmul(pred_embedding, codebook.T)  # (1, V)
-        next_idx = torch.argmax(logits, dim=-1).item()
+        
+        if temperature > 0:
+            # Stochastic sampling with temperature
+            scaled_logits = logits / temperature
+            probs = torch.softmax(scaled_logits, dim=-1)
+            next_idx = torch.multinomial(probs, 1).item()
+        else:
+            # Greedy decoding (temperature = 0)
+            next_idx = torch.argmax(logits, dim=-1).item()
+            
         generated_indices.append(next_idx)
 
     # Convert indices back to quantized embeddings (1, e_dim, seq_len)
@@ -88,6 +102,7 @@ def main():
     parser.add_argument("--experiment-name", type=str, required=True, help="Name of the experiment folder to load.")
     parser.add_argument("--checkpoint", type=str, default="auto", help="Path to checkpoint to load; use 'auto' for latest inside experiment.")
     parser.add_argument("--output", type=str, default="generation.png", help="Filename for the generated image.")
+    parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for sampling. Use 0 for greedy decoding, >0 for stochastic sampling (default: 1.0).")
     args = parser.parse_args()
 
     exp_dir = os.path.join(args.results_dir, args.experiment_name)
@@ -113,8 +128,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    # Sample code tokens greedily
-    quantized_code = greedy_sample_code(model).to(device)
+    # Sample code tokens with specified temperature
+    quantized_code = sample_code(model, temperature=args.temperature).to(device)
 
     # Dummy image to provide spatial dimensions (content ignored when code provided)
     img_size = config.data.image_size
@@ -125,7 +140,7 @@ def main():
         generated = model.reconstruct(dummy, dtype=torch.float32, code=quantized_code)  # (1,3,H,W)
 
     save_image(generated[0], args.output)
-    print(f"Image saved to {args.output}")
+    print(f"Image saved to {args.output} (temperature: {args.temperature})")
 
 
 if __name__ == "__main__":
