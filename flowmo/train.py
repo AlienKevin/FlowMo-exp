@@ -65,9 +65,12 @@ def train_step(config, model, batch, optimizer, aux_state):
             loss.backward()
             total_loss += loss.detach()
 
+    original_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
     if config.opt.log_norms:
-        original_grad_norm = _get_norm(model, getter=lambda p: p.grad)
+        clipped_grad_norm = _get_norm(model, getter=lambda p: p.grad)
         aux["loss_dict"]["debug/original_grad_norm"] = original_grad_norm
+        aux["loss_dict"]["debug/clipped_grad_norm"] = clipped_grad_norm
         aux["loss_dict"]["debug/param_norm"] = _get_norm(model, getter=lambda p: p)
 
     optimizer.step()
