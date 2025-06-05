@@ -220,6 +220,8 @@ def main(args, config):
         if config.opt.freeze_encoder or total_steps >= config.opt.freeze_encoder_after:
             if not rebuilt_optimizer:
                 print(f"Rebuilding optimizer at step {total_steps}")
+                prior_pg['lr'] = config.opt.lr
+                model.module.config.prior.loss_weight = 1.0
                 optimizer = build_optimizer([decoder_pg, prior_pg])
                 rebuilt_optimizer = True
                 model.module.encoder.requires_grad_(False)
