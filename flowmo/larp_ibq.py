@@ -50,23 +50,18 @@ class LabelEmbedder(nn.Module):
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
 
-    def token_drop(self, labels, force_drop_ids=None):
+    def token_drop(self, labels):
         """
         Drops labels to enable classifier-free guidance.
         """
-        if force_drop_ids is None:
-            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-        else:
-            drop_ids = force_drop_ids == 1
-        labels = torch.where(drop_ids, self.num_classes, labels)
+        drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+        labels = labels.masked_fill(drop_ids, self.num_classes)
         return labels
 
-    def forward(self, labels, train, force_drop_ids=None):
+    def forward(self, labels, train):
         use_dropout = self.dropout_prob > 0
-        if (train and use_dropout) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, force_drop_ids)
-        # Ensure labels are on the same device as embedding table
-        labels = labels.to(self.embedding_table.weight.device)
+        if train and use_dropout:
+            labels = self.token_drop(labels)
         embeddings = self.embedding_table(labels).unsqueeze(1)
         return embeddings
 

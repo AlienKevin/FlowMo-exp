@@ -25,8 +25,8 @@ MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
 torchrun --nproc-per-node=1 --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_hi_lfq_2_64x64_pretrain" \
-    model.context_dim=56 model.codebook_size_for_entropy=14 model.quantization_type="lfq" \
+    --experiment-name "flowmo_hi_ibq_n_grad_acc_1_64x64_pretrain" \
+    model.context_dim=56 model.codebook_size_for_entropy=14 model.quantization_type="ibq" \
     model.patch_size=4 model.mup_width=4 model.code_length=64 \
     data.batch_size=128 \
     data.eval_batch_size=40 \

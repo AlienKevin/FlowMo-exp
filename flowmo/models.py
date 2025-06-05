@@ -925,7 +925,7 @@ class FlowMo(nn.Module):
 
 def rf_loss(config, model, batch, aux_state):
     x = batch["image"]
-    cond = batch["label"]
+    cond = batch["label"].to(x.device)
     b = x.size(0)
 
     if config.opt.schedule == "lognormal":
