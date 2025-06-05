@@ -665,7 +665,7 @@ class FlowMo(nn.Module):
         )
 
     @torch.compile
-    def _quantize(self, code):
+    def _quantize(self, code, cond):
         """
         Args:
             code: [b codelength context dim]
@@ -751,7 +751,7 @@ class FlowMo(nn.Module):
                 fg=self.config.model.codebook_size_for_entropy,
             )
 
-            quantized, (prior_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices = self.quantizer(code, prior_stop_grad=self.config.prior.stop_grad)
+            quantized, (prior_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices = self.quantizer(code, cond, prior_stop_grad=self.config.prior.stop_grad)
             assert quantized.shape == code.shape
             quantized = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
 
@@ -817,6 +817,7 @@ class FlowMo(nn.Module):
         self,
         img,
         noised_img,
+        cond,
         timesteps,
         enable_cfg=True,
     ):
@@ -828,7 +829,7 @@ class FlowMo(nn.Module):
 
         b, t, f = code.shape
 
-        code, _, quant_aux = self._quantize(code)
+        code, _, quant_aux = self._quantize(code, cond)
         aux.update(quant_aux)
 
         mask = torch.ones_like(code[..., :1])
@@ -924,6 +925,7 @@ class FlowMo(nn.Module):
 
 def rf_loss(config, model, batch, aux_state):
     x = batch["image"]
+    cond = batch["label"]
     b = x.size(0)
 
     if config.opt.schedule == "lognormal":
@@ -950,6 +952,7 @@ def rf_loss(config, model, batch, aux_state):
     vtheta, aux = model(
         img=x,
         noised_img=zt,
+        cond=cond,
         timesteps=t.reshape((b,)),
     )
 

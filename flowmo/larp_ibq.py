@@ -5,7 +5,6 @@ from einops import rearrange
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
 from flowmo import ibq
-from flowmo.gptc import GPTC_models
 
 def init_qwen_weights(std, module):
     if isinstance(module, nn.Linear):
@@ -39,6 +38,39 @@ def freeze_embedding_layer(model):
         param.requires_grad = False
 
 
+# https://github.com/FoundationVision/LlamaGen/blob/ce98ec41803a74a90ce68c40ababa9eaeffeb4ec/autoregressive/models/gpt.py#L56
+class LabelEmbedder(nn.Module):
+    """
+    Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
+    """
+    def __init__(self, num_classes, hidden_size, dropout_prob):
+        super().__init__()
+        use_cfg_embedding = dropout_prob > 0
+        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
+        self.num_classes = num_classes
+        self.dropout_prob = dropout_prob
+
+    def token_drop(self, labels, force_drop_ids=None):
+        """
+        Drops labels to enable classifier-free guidance.
+        """
+        if force_drop_ids is None:
+            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+        else:
+            drop_ids = force_drop_ids == 1
+        labels = torch.where(drop_ids, self.num_classes, labels)
+        return labels
+
+    def forward(self, labels, train, force_drop_ids=None):
+        use_dropout = self.dropout_prob > 0
+        if (train and use_dropout) or (force_drop_ids is not None):
+            labels = self.token_drop(labels, force_drop_ids)
+        # Ensure labels are on the same device as embedding table
+        labels = labels.to(self.embedding_table.weight.device)
+        embeddings = self.embedding_table(labels).unsqueeze(1)
+        return embeddings
+
+
 class LARPQuantizer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -53,25 +85,26 @@ class LARPQuantizer(nn.Module):
 
         # Continuous Autoregressive Prior Model
         prior_config = config.prior
-        if prior_config.model_name.startswith('Qwen'):
-            from transformers import AutoModelForCausalLM
 
-            model_id = f'Qwen/{prior_config.model_name}'
+        from transformers import AutoModelForCausalLM
 
-            self.prior_model = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                torch_dtype="auto",
-            )
-            randomize_qwen(self.prior_model)
-            # delete_embedding_layer(self.prior_model)
-            freeze_embedding_layer(self.prior_model)
+        model_id = f'Qwen/{prior_config.model_name}'
 
-            self.prior_model_project_in = nn.Linear(self.config.model.codebook_size_for_entropy, self.prior_model.config.hidden_size)
-            self.prior_model_project_out = nn.Linear(self.prior_model.config.hidden_size, self.config.model.codebook_size_for_entropy)
-        elif prior_config.model_name.startswith('gptc'):
-            self.prior_model = GPTC_models[prior_config.model_name](n_ind=self.config.model.codebook_size_for_entropy)
+        self.prior_model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype="auto",
+        )
+        randomize_qwen(self.prior_model)
+        # delete_embedding_layer(self.prior_model)
+        freeze_embedding_layer(self.prior_model)
 
-    def forward(self, x, prior_stop_grad=True):
+        self.prior_model_project_in = nn.Linear(self.config.model.codebook_size_for_entropy, self.prior_model.config.hidden_size)
+        self.prior_model_project_out = nn.Linear(self.prior_model.config.hidden_size, self.config.model.codebook_size_for_entropy)
+
+        self.prior_model_cls_embedding = LabelEmbedder(config.data.num_classes, self.prior_model.config.hidden_size, config.prior.class_dropout_prob)
+
+
+    def forward(self, x, cond, prior_stop_grad=True):
         # x: [batch_size, feature_dim, sequence_length]
         batch_size, feature_dim, seq_len = x.shape
         
@@ -85,18 +118,16 @@ class LARPQuantizer(nn.Module):
         # Prior input: quantized shifted by one (predict next token)
         # Prior target: actual next token indices
         prior_input = rearrange(quantized.detach() if prior_stop_grad else quantized, "b d t -> b t d")[:, :-1, :]
-        prior_target_indices = (indices.detach() if prior_stop_grad else indices).reshape(batch_size, seq_len)[:, 1:]
+        prior_target_indices = (indices.detach() if prior_stop_grad else indices).reshape(batch_size, seq_len)
 
         # Get v_bar from prior model
-        if self.config.prior.model_name.startswith('Qwen'):
-            prior_input = self.prior_model_project_in(prior_input)
-            prior_output = self.prior_model(inputs_embeds=prior_input, output_hidden_states=True).hidden_states[-1]
-            # predicted: [B, seq_len-1, codebook_dim]
-            predicted = self.prior_model_project_out(prior_output)
-        elif self.config.prior.model_name.startswith('gptc'):
-            # predicted: [B, seq_len-1, codebook_dim]
-            predicted = self.prior_model(prior_input)
-        
+        prior_input = self.prior_model_project_in(prior_input)
+        cond_embeddings = self.prior_model_cls_embedding(cond, train=self.training)
+        prior_input = torch.cat((cond_embeddings, prior_input), dim=1)
+        prior_output = self.prior_model(inputs_embeds=prior_input, output_hidden_states=True).hidden_states[-1]
+        # predicted: [B, seq_len-1, codebook_dim]
+        predicted = self.prior_model_project_out(prior_output)
+    
         # # 4. Calculate NLL loss (Lprior)
         logits = torch.einsum('btd,cd->btc', predicted, codebook)
         

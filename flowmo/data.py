@@ -85,7 +85,6 @@ class IndexedTarDataset(Dataset):
         else:
             caption = self.captions[image_info["name"]]
         return image, label, caption
-        return image, label
 
     def preprocess_image(self, image_info):
         image, label, caption = self.get_image(image_info)
