@@ -3,7 +3,6 @@ old_results/
 results/
 __pycache__/
 *.tar
-*.json
 *.pth
 *.csv
 *.tsv
@@ -11,3 +10,4 @@ __pycache__/
 flowmohi_logs/
 flowmolo_logs/
 unsloth_compiled_cache/
+imagenet_train_index_overall.json
