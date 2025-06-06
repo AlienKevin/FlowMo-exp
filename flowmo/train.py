@@ -225,10 +225,9 @@ def main(args, config):
                 print(f"Rebuilding optimizer at step {total_steps}")
                 prior_pg['lr'] = config.opt.lr
                 model.module.config.prior.loss_weight = 1.0
+                model.module.config.prior.stop_grad = True
                 optimizer = build_optimizer([decoder_pg, prior_pg])
                 rebuilt_optimizer = True
-                for param in quantizer_pg['params']:
-                    param.requires_grad_(False)
                 model.module.encoder.requires_grad_(False)
                 model_ema.decay = config.model.ema_decay
 
