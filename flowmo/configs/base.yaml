@@ -45,6 +45,7 @@ prior:
   loss_weight: 0.001
   stop_grad: True
   class_dropout_prob: 0.1
+  random_init: True
 
 opt:
   # Floats need to be specified with decimals to get loaded as such

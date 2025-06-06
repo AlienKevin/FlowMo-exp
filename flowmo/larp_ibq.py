@@ -89,7 +89,8 @@ class LARPQuantizer(nn.Module):
             model_id,
             torch_dtype="auto",
         )
-        randomize_qwen(self.prior_model)
+        if prior_config.random_init:
+            randomize_qwen(self.prior_model)
         # delete_embedding_layer(self.prior_model)
         freeze_embedding_layer(self.prior_model)
 

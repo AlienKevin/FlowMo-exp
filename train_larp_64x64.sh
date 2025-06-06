@@ -25,11 +25,14 @@ MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
 torchrun --nproc-per-node=1 --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "flowmo_hi_c2i_larp_ibq_rand_sg_prior_0.001_multiplier_100_64x64_pretrain" \
+    --experiment-name "flowmo_hi_c2i_larp_ibq_sg_prior_0.001_multiplier_10_64x64_pretrain" \
     model.context_dim=56 model.codebook_size_for_entropy=14 model.quantization_type="larp_ibq" \
     model.patch_size=4 model.mup_width=4 model.code_length=64 \
     prior.model_name="Qwen3-0.6B" \
+    prior.random_init=False \
     prior.stop_grad=True \
+    prior.loss_weight=0.001 \
+    prior.lr_multiplier=10 \
     data.batch_size=128 \
     data.eval_batch_size=40 \
     data.image_size=64 \
