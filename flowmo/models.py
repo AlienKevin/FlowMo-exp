@@ -897,7 +897,8 @@ class FlowMo(nn.Module):
             if code is None:
                 x = images.cuda()
                 prequantized_code = model.encode(x)[0].cuda()
-                code, _, _ = model._quantize(prequantized_code)
+                dummy_cond = 0
+                code, indices, _ = model._quantize(prequantized_code, dummy_cond)
                 quantized = code.clone()
 
             z = torch.randn((bs, 3, h, w)).cuda()
@@ -918,7 +919,7 @@ class FlowMo(nn.Module):
                 schedule=config.schedule,
             )[-1].clip(-1, 1)
         if not has_code_input:
-            return samples.to(torch.float32), quantized
+            return samples.to(torch.float32), quantized, indices
         else:
             return samples.to(torch.float32)
 

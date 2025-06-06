@@ -157,6 +157,7 @@ def eval_imagenet(model, config):
 
     pred_xs = []
     pred_recs = []
+    all_indices = []  # Collect indices across batches
 
     loss_fn_alex = lpips.LPIPS(net="alex").cuda()  # best forward scores
     loss_fn_vgg = lpips.LPIPS(net="vgg").to(
@@ -218,7 +219,7 @@ def eval_imagenet(model, config):
         # run normal evaluation
         dtype = torch.bfloat16 if train_utils.bfloat16_is_available() else torch.float32
         print(dtype)
-        reconstruct_fn = lambda x: model.reconstruct(x, dtype=dtype)[0]
+        reconstruct_fn = lambda x: model.reconstruct(x, dtype=dtype)
     else:
         raise NotImplementedError
 
@@ -236,8 +237,10 @@ def eval_imagenet(model, config):
             batch["image"] = images
             num_images += images.shape[0]
 
-            reconstructed_images = reconstruct_fn(images)
+            reconstructed_images, _, indices = reconstruct_fn(images)
             reconstructed_images = reconstructed_images.clamp(-1, 1)
+            
+            all_indices.append(indices)
 
             images = (images + 1) / 2
             reconstructed_images = (reconstructed_images + 1) / 2
@@ -310,6 +313,18 @@ def eval_imagenet(model, config):
 
     fid_value = _calculate_fid(pred_xs, pred_recs)
 
+    # Calculate overall codebook usage if indices were collected
+    codebook_usage = 0.0
+    if all_indices and config.eval.eval_baseline == "":
+        # Concatenate all indices and calculate unique usage
+        all_indices_tensor = torch.cat(all_indices, dim=0)
+        all_indices_gathered = _gather_concat_np(all_indices_tensor.cpu().numpy())
+        all_indices_gathered = torch.from_numpy(all_indices_gathered).to(all_indices_tensor.device)
+        
+        # Get codebook size from the model (assuming it's available)
+        codebook_size = model.quantizer.codebook_size
+        codebook_usage = all_indices_gathered.unique().numel() / codebook_size * 100
+
     if config.eval.reconstruction:
         lpips_alex_value = _reduce_scalar((lpips_alex / num_images).item())
         lpips_vgg_value = _reduce_scalar((lpips_vgg / num_images).item())
@@ -326,6 +341,11 @@ def eval_imagenet(model, config):
         }
 
     metrics = {"FID: ": fid_value, **reconstruction_metrics}
+    
+    # Add codebook usage to metrics if calculated
+    if codebook_usage > 0:
+        metrics["CODEBOOK_USAGE"] = codebook_usage
+    
     return generated_batches, metrics
 
 
