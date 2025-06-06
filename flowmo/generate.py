@@ -20,13 +20,14 @@ def find_latest_checkpoint(exp_dir: str):
 
 
 @torch.no_grad()
-def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: bool = False):
+def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: bool = False, class_idx: int = None):
     """Autoregressively samples quantized code tokens using the prior model.
     
     Args:
         model: FlowMo model with quantizer and prior
         temperature: Temperature for sampling. If 0, uses greedy decoding. If > 0, uses stochastic sampling.
         random_indices: If True, generates completely random indices instead of using the prior model
+        class_idx: If not None, conditions generation on this class index.
     """
     device = next(model.parameters()).device
     quantizer = model.quantizer  # LARPQuantizer
@@ -48,25 +49,58 @@ def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: 
         # Storage for generated indices
         generated_indices = []
 
-        # Initialise first token randomly for diversity (could also be fixed to 0)
-        first_idx = torch.randint(0, vocab_size, (1,), device=device).item()
-        generated_indices.append(first_idx)
-
         # Convenience projections (for Qwen-style priors)
         use_qwen = hasattr(quantizer, 'prior_model_project_in') and hasattr(quantizer, 'prior_model_project_out')
 
-        for _ in range(1, seq_len):
-            # Build input embeddings tensor (1, current_len, e_dim)
-            input_embeddings = codebook[torch.tensor(generated_indices, device=device)].unsqueeze(0)  # (1, t, D)
+        prompt_embedding = None
+        if class_idx is not None:
+            if not hasattr(quantizer, 'prior_model_cls_embedding'):
+                raise AttributeError("Quantizer does not have 'prior_model_cls_embedding' attribute for conditioning.")
+            
+            class_emb = quantizer.prior_model_cls_embedding(torch.tensor([class_idx], device=device), train=False) # (1, 1, D_class)
+            
+            if use_qwen:
+                # class_emb is not projected as per user instruction. Assumes it has the right dimension for the prior.
+                prompt_embedding = class_emb.to(torch.bfloat16)
+            else:
+                prompt_embedding = class_emb
+        
+        # If no class conditioning, the model starts from nothing and we'll feed it a random token
+        if class_idx is None:
+            # Initialise first token randomly for diversity (could also be fixed to 0)
+            first_idx = torch.randint(0, vocab_size, (1,), device=device).item()
+            generated_indices.append(first_idx)
+
+        # Autoregressively generate the remaining tokens
+        num_to_gen = seq_len if class_idx is not None else seq_len - 1
+
+        for _ in range(num_to_gen):
+            # Build input embeddings tensor
+            code_embeddings = codebook[torch.tensor(generated_indices, device=device)].unsqueeze(0) if generated_indices else None
 
             if use_qwen:
                 # Qwen prior
                 proj_in = quantizer.prior_model_project_in
                 proj_out = quantizer.prior_model_project_out
-                hidden = quantizer.prior_model(inputs_embeds=proj_in(input_embeddings).to(torch.bfloat16), output_hidden_states=True).hidden_states[-1].to(torch.float)
+
+                input_parts = []
+                if prompt_embedding is not None:
+                    input_parts.append(prompt_embedding)
+                if code_embeddings is not None:
+                    input_parts.append(proj_in(code_embeddings).to(torch.bfloat16))
+                input_embeddings = torch.cat(input_parts, dim=1)
+                
+                hidden = quantizer.prior_model(inputs_embeds=input_embeddings, output_hidden_states=True).hidden_states[-1].to(torch.float)
                 pred_embedding = proj_out(hidden[:, -1, :])  # (1, D)
             else:
                 # GPT-C style prior
+                input_parts = []
+                if prompt_embedding is not None:
+                    input_parts.append(prompt_embedding)
+                if code_embeddings is not None:
+                    input_parts.append(code_embeddings)
+
+                input_embeddings = torch.cat(input_parts, dim=1)
                 pred_sequence = quantizer.prior_model(input_embeddings)  # (1, t, D)
                 pred_embedding = pred_sequence[:, -1, :]  # (1, D)
 
@@ -109,6 +143,7 @@ def main():
     parser.add_argument("--output", type=str, default="generation.png", help="Filename for the generated image.")
     parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for sampling. Use 0 for greedy decoding, >0 for stochastic sampling (default: 1.0).")
     parser.add_argument("--random-indices", action="store_true", help="Generate completely random indices instead of using the prior model")
+    parser.add_argument("--class-idx", type=int, default=None, help="Class index for conditional generation.")
     args = parser.parse_args()
 
     exp_dir = os.path.join(args.results_dir, args.experiment_name)
@@ -135,7 +170,7 @@ def main():
     model.to(device)
 
     # Sample code tokens with specified temperature
-    quantized_code = sample_code(model, temperature=args.temperature, random_indices=args.random_indices).to(device)
+    quantized_code = sample_code(model, temperature=args.temperature, random_indices=args.random_indices, class_idx=args.class_idx).to(device)
 
     # Dummy image to provide spatial dimensions (content ignored when code provided)
     img_size = config.data.image_size
