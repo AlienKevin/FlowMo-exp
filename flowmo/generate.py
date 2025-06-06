@@ -20,12 +20,13 @@ def find_latest_checkpoint(exp_dir: str):
 
 
 @torch.no_grad()
-def sample_code(model: models.FlowMo, temperature: float = 0.0):
+def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: bool = False):
     """Autoregressively samples quantized code tokens using the prior model.
     
     Args:
         model: FlowMo model with quantizer and prior
         temperature: Temperature for sampling. If 0, uses greedy decoding. If > 0, uses stochastic sampling.
+        random_indices: If True, generates completely random indices instead of using the prior model
     """
     device = next(model.parameters()).device
     quantizer = model.quantizer  # LARPQuantizer
@@ -40,44 +41,48 @@ def sample_code(model: models.FlowMo, temperature: float = 0.0):
     sub_tokens = context_dim // group_dim  # fh, should be integer (e.g. 4)
     seq_len = code_length * sub_tokens  # total number of tokens to generate (e.g. 256)
 
-    # Storage for generated indices
-    generated_indices = []
+    if random_indices:
+        # Generate completely random indices
+        generated_indices = torch.randint(0, vocab_size, (seq_len,), device=device).tolist()
+    else:
+        # Storage for generated indices
+        generated_indices = []
 
-    # Initialise first token randomly for diversity (could also be fixed to 0)
-    first_idx = torch.randint(0, vocab_size, (1,), device=device).item()
-    generated_indices.append(first_idx)
+        # Initialise first token randomly for diversity (could also be fixed to 0)
+        first_idx = torch.randint(0, vocab_size, (1,), device=device).item()
+        generated_indices.append(first_idx)
 
-    # Convenience projections (for Qwen-style priors)
-    use_qwen = hasattr(quantizer, 'prior_model_project_in') and hasattr(quantizer, 'prior_model_project_out')
+        # Convenience projections (for Qwen-style priors)
+        use_qwen = hasattr(quantizer, 'prior_model_project_in') and hasattr(quantizer, 'prior_model_project_out')
 
-    for _ in range(1, seq_len):
-        # Build input embeddings tensor (1, current_len, e_dim)
-        input_embeddings = codebook[torch.tensor(generated_indices, device=device)].unsqueeze(0)  # (1, t, D)
+        for _ in range(1, seq_len):
+            # Build input embeddings tensor (1, current_len, e_dim)
+            input_embeddings = codebook[torch.tensor(generated_indices, device=device)].unsqueeze(0)  # (1, t, D)
 
-        if use_qwen:
-            # Qwen prior
-            proj_in = quantizer.prior_model_project_in
-            proj_out = quantizer.prior_model_project_out
-            hidden = quantizer.prior_model(inputs_embeds=proj_in(input_embeddings).to(torch.bfloat16), output_hidden_states=True).hidden_states[-1].to(torch.float)
-            pred_embedding = proj_out(hidden[:, -1, :])  # (1, D)
-        else:
-            # GPT-C style prior
-            pred_sequence = quantizer.prior_model(input_embeddings)  # (1, t, D)
-            pred_embedding = pred_sequence[:, -1, :]  # (1, D)
+            if use_qwen:
+                # Qwen prior
+                proj_in = quantizer.prior_model_project_in
+                proj_out = quantizer.prior_model_project_out
+                hidden = quantizer.prior_model(inputs_embeds=proj_in(input_embeddings).to(torch.bfloat16), output_hidden_states=True).hidden_states[-1].to(torch.float)
+                pred_embedding = proj_out(hidden[:, -1, :])  # (1, D)
+            else:
+                # GPT-C style prior
+                pred_sequence = quantizer.prior_model(input_embeddings)  # (1, t, D)
+                pred_embedding = pred_sequence[:, -1, :]  # (1, D)
 
-        # Sample next token based on temperature
-        logits = torch.matmul(pred_embedding, codebook.T)  # (1, V)
-        
-        if temperature > 0:
-            # Stochastic sampling with temperature
-            scaled_logits = logits / temperature
-            probs = torch.softmax(scaled_logits, dim=-1)
-            next_idx = torch.multinomial(probs, 1).item()
-        else:
-            # Greedy decoding (temperature = 0)
-            next_idx = torch.argmax(logits, dim=-1).item()
+            # Sample next token based on temperature
+            logits = torch.matmul(pred_embedding, codebook.T)  # (1, V)
             
-        generated_indices.append(next_idx)
+            if temperature > 0:
+                # Stochastic sampling with temperature
+                scaled_logits = logits / temperature
+                probs = torch.softmax(scaled_logits, dim=-1)
+                next_idx = torch.multinomial(probs, 1).item()
+            else:
+                # Greedy decoding (temperature = 0)
+                next_idx = torch.argmax(logits, dim=-1).item()
+                
+            generated_indices.append(next_idx)
 
     # Convert indices back to quantized embeddings (1, e_dim, seq_len)
     indices_tensor = torch.tensor(generated_indices, device=device).long()
@@ -103,6 +108,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, default="auto", help="Path to checkpoint to load; use 'auto' for latest inside experiment.")
     parser.add_argument("--output", type=str, default="generation.png", help="Filename for the generated image.")
     parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for sampling. Use 0 for greedy decoding, >0 for stochastic sampling (default: 1.0).")
+    parser.add_argument("--random-indices", action="store_true", help="Generate completely random indices instead of using the prior model")
     args = parser.parse_args()
 
     exp_dir = os.path.join(args.results_dir, args.experiment_name)
@@ -129,7 +135,7 @@ def main():
     model.to(device)
 
     # Sample code tokens with specified temperature
-    quantized_code = sample_code(model, temperature=args.temperature).to(device)
+    quantized_code = sample_code(model, temperature=args.temperature, random_indices=args.random_indices).to(device)
 
     # Dummy image to provide spatial dimensions (content ignored when code provided)
     img_size = config.data.image_size
