@@ -20,7 +20,7 @@ def find_latest_checkpoint(exp_dir: str):
 
 
 @torch.no_grad()
-def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: bool = False, class_idx: int = None):
+def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: bool = False, class_idx: int = None, cfg_scale: float = 1.0, num_classes: int = 1000):
     """Autoregressively samples quantized code tokens using the prior model.
     
     Args:
@@ -28,6 +28,8 @@ def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: 
         temperature: Temperature for sampling. If 0, uses greedy decoding. If > 0, uses stochastic sampling.
         random_indices: If True, generates completely random indices instead of using the prior model
         class_idx: If not None, conditions generation on this class index.
+        cfg_scale: Classifier-Free Guidance scale. If > 1.0, mixes conditional and unconditional logits.
+        num_classes: Number of classes for conditional generation. Used for CFG.
     """
     device = next(model.parameters()).device
     quantizer = model.quantizer  # LARPQuantizer
@@ -49,28 +51,21 @@ def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: 
         # Storage for generated indices
         generated_indices = []
 
-        # Convenience projections (for Qwen-style priors)
-        use_qwen = hasattr(quantizer, 'prior_model_project_in') and hasattr(quantizer, 'prior_model_project_out')
-
+        do_cfg = cfg_scale > 1.0 and class_idx is not None
+        
         prompt_embedding = None
         if class_idx is not None:
             if not hasattr(quantizer, 'prior_model_cls_embedding'):
                 raise AttributeError("Quantizer does not have 'prior_model_cls_embedding' attribute for conditioning.")
             
             class_emb = quantizer.prior_model_cls_embedding(torch.tensor([class_idx], device=device), train=False) # (1, 1, D_class)
-            
-            if use_qwen:
-                # class_emb is not projected as per user instruction. Assumes it has the right dimension for the prior.
-                prompt_embedding = class_emb.to(torch.bfloat16)
-            else:
-                prompt_embedding = class_emb
-        
-        # If no class conditioning, the model starts from nothing and we'll feed it a random token
-        if class_idx is None:
-            # Initialise first token randomly for diversity (could also be fixed to 0)
-            first_idx = torch.randint(0, vocab_size, (1,), device=device).item()
-            generated_indices.append(first_idx)
+            prompt_embedding = class_emb.to(torch.bfloat16)
 
+        uncond_prompt_embedding = None
+        if do_cfg:
+            uncond_class_emb = quantizer.prior_model_cls_embedding(torch.tensor([num_classes], device=device), train=False)
+            uncond_prompt_embedding = uncond_class_emb.to(torch.bfloat16)
+        
         # Autoregressively generate the remaining tokens
         num_to_gen = seq_len if class_idx is not None else seq_len - 1
 
@@ -78,34 +73,39 @@ def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: 
             # Build input embeddings tensor
             code_embeddings = codebook[torch.tensor(generated_indices, device=device)].unsqueeze(0) if generated_indices else None
 
-            if use_qwen:
-                # Qwen prior
-                proj_in = quantizer.prior_model_project_in
-                proj_out = quantizer.prior_model_project_out
+            # Qwen prior
+            proj_in = quantizer.prior_model_project_in
+            proj_out = quantizer.prior_model_project_out
+            code_embeddings_proj = proj_in(code_embeddings).to(torch.bfloat16) if code_embeddings is not None else None
 
+            if do_cfg:
+                prompts = torch.cat([prompt_embedding, uncond_prompt_embedding], dim=0)
+
+                if code_embeddings_proj is not None:
+                    code_embeddings_batch = code_embeddings_proj.repeat(2, 1, 1)
+                    input_embeddings = torch.cat([prompts, code_embeddings_batch], dim=1)
+                else:
+                    input_embeddings = prompts
+                
+                hidden = quantizer.prior_model(inputs_embeds=input_embeddings, output_hidden_states=True).hidden_states[-1].to(torch.float)
+                pred_embedding = proj_out(hidden[:, -1, :])
+
+                logits_batch = torch.matmul(pred_embedding, codebook.T)
+                logits_cond, logits_uncond = logits_batch.chunk(2)
+                logits = logits_uncond + cfg_scale * (logits_cond - logits_uncond)
+            else:
                 input_parts = []
                 if prompt_embedding is not None:
                     input_parts.append(prompt_embedding)
-                if code_embeddings is not None:
-                    input_parts.append(proj_in(code_embeddings).to(torch.bfloat16))
+                if code_embeddings_proj is not None:
+                    input_parts.append(code_embeddings_proj)
                 input_embeddings = torch.cat(input_parts, dim=1)
                 
                 hidden = quantizer.prior_model(inputs_embeds=input_embeddings, output_hidden_states=True).hidden_states[-1].to(torch.float)
                 pred_embedding = proj_out(hidden[:, -1, :])  # (1, D)
-            else:
-                # GPT-C style prior
-                input_parts = []
-                if prompt_embedding is not None:
-                    input_parts.append(prompt_embedding)
-                if code_embeddings is not None:
-                    input_parts.append(code_embeddings)
 
-                input_embeddings = torch.cat(input_parts, dim=1)
-                pred_sequence = quantizer.prior_model(input_embeddings)  # (1, t, D)
-                pred_embedding = pred_sequence[:, -1, :]  # (1, D)
-
-            # Sample next token based on temperature
-            logits = torch.matmul(pred_embedding, codebook.T)  # (1, V)
+                # Sample next token based on temperature
+                logits = torch.matmul(pred_embedding, codebook.T)  # (1, V)
             
             if temperature > 0:
                 # Stochastic sampling with temperature
@@ -143,7 +143,9 @@ def main():
     parser.add_argument("--output", type=str, default="generation.png", help="Filename for the generated image.")
     parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for sampling. Use 0 for greedy decoding, >0 for stochastic sampling (default: 1.0).")
     parser.add_argument("--random-indices", action="store_true", help="Generate completely random indices instead of using the prior model")
-    parser.add_argument("--class-idx", type=int, default=None, help="Class index for conditional generation.")
+    parser.add_argument("--class-idx", type=int, help="Class index for conditional generation.")
+    parser.add_argument("--cfg-scale", type=float, default=2.0, help="Classifier-Free Guidance scale. Use > 1.0 for CFG.")
+    parser.add_argument("--num-classes", type=int, default=1000, help="Number of classes for CFG.")
     args = parser.parse_args()
 
     exp_dir = os.path.join(args.results_dir, args.experiment_name)
@@ -170,7 +172,7 @@ def main():
     model.to(device)
 
     # Sample code tokens with specified temperature
-    quantized_code = sample_code(model, temperature=args.temperature, random_indices=args.random_indices, class_idx=args.class_idx).to(device)
+    quantized_code = sample_code(model, temperature=args.temperature, random_indices=args.random_indices, class_idx=args.class_idx, cfg_scale=args.cfg_scale, num_classes=args.num_classes).to(device)
 
     # Dummy image to provide spatial dimensions (content ignored when code provided)
     img_size = config.data.image_size
@@ -181,7 +183,7 @@ def main():
         generated = model.reconstruct(dummy, dtype=torch.float32, code=quantized_code)  # (1,3,H,W)
 
     save_image(generated[0], args.output)
-    print(f"Image saved to {args.output} (temperature: {args.temperature})")
+    print(f"Image saved to {args.output} (temperature: {args.temperature}, cfg_scale: {args.cfg_scale})")
 
 
 if __name__ == "__main__":
