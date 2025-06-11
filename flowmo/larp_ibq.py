@@ -166,15 +166,29 @@ class LARPQuantizer(nn.Module):
                 # Split the hidden states back into image and caption parts
                 image_hidden_states, caption_hidden_states = middle_hidden_states.chunk(2, dim=0)
 
-                image_hs_pooled = image_hidden_states.mean(dim=1)
+                # Token-by-token alignment, ignoring caption paddings
+                # Normalize hidden states for cosine similarity
+                image_hs_norm = F.normalize(image_hidden_states, p=2, dim=-1)
+                caption_hs_norm = F.normalize(caption_hidden_states, p=2, dim=-1)
 
-                # Masked pooling for captions
-                input_mask_expanded = caption_mask.unsqueeze(-1)
-                sum_embeddings = (caption_hidden_states * input_mask_expanded).sum(dim=1)
-                sum_mask = torch.clamp(input_mask_expanded.sum(dim=1), min=1e-9)
-                caption_hs_pooled = sum_embeddings / sum_mask
+                # Compute pairwise cosine similarity: [B, T_img, T_txt]
+                cosine_sim = torch.einsum('bid,bjd->bij', image_hs_norm, caption_hs_norm)
 
-                prior_caption_alignment_loss = (1 - F.cosine_similarity(image_hs_pooled, caption_hs_pooled, dim=-1)).mean()
+                # Mask out padding tokens in captions
+                # caption_mask: [B, T_txt] -> [B, 1, T_txt]
+                caption_mask_expanded = caption_mask.unsqueeze(1).float()
+                cosine_sim = cosine_sim * caption_mask_expanded
+                
+                # Number of non-padding tokens in each caption sentence
+                num_caption_tokens = torch.clamp(caption_mask.sum(dim=1, keepdim=True), min=1e-9)
+
+                # Sum over caption tokens and average for each image token
+                avg_sim_per_image_token = cosine_sim.sum(dim=2) / num_caption_tokens
+
+                # Average over all image tokens
+                avg_sim = avg_sim_per_image_token.mean(dim=1)
+
+                prior_caption_alignment_loss = (1 - avg_sim).mean()
 
                 last_hidden_states = prior_output.hidden_states[-1]
                 image_last_hs = last_hidden_states[:batch_size]
