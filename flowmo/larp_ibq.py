@@ -89,6 +89,12 @@ class LARPQuantizer(nn.Module):
             model_id,
             torch_dtype="auto",
         )
+        self.frozen_prior_model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype="auto",
+        )
+        for param in self.frozen_prior_model.parameters():
+            param.requires_grad = False
         self.prior_tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.prior_tokenizer.pad_token = self.prior_tokenizer.eos_token
         if prior_config.random_init:
@@ -141,30 +147,26 @@ class LARPQuantizer(nn.Module):
                 prior_caption_loss = torch.tensor(0.0).to(predicted.device)
                 prior_caption_alignment_loss = torch.tensor(0.0).to(predicted.device)
             else:
-                tokenized_captions = self._tokenize_captions(caption, x.device)
-                caption_embeddings = self.prior_model.model.embed_tokens(tokenized_captions.input_ids)
-
                 image_embeddings = torch.cat((cond_embeddings, prior_input[:, :-1, :]), dim=1)
-
-                # Concatenate along batch dimension for parallel encoding
-                model_input = torch.cat((image_embeddings, caption_embeddings), dim=0)
-
-                caption_mask = tokenized_captions.attention_mask
-                image_mask = torch.ones(batch_size, image_embeddings.shape[1], dtype=torch.long, device=x.device)
-                attention_mask = torch.cat((image_mask, caption_mask), dim=0)
-
                 prior_output = self.prior_model(
-                    inputs_embeds=model_input,
-                    attention_mask=attention_mask,
+                    inputs_embeds=image_embeddings,
                     output_hidden_states=True,
                     return_dict=True
                 )
-
                 middle_layer_idx = self.prior_model.config.num_hidden_layers // 2
-                middle_hidden_states = prior_output.hidden_states[middle_layer_idx]
+                image_hidden_states = prior_output.hidden_states[middle_layer_idx]
 
-                # Split the hidden states back into image and caption parts
-                image_hidden_states, caption_hidden_states = middle_hidden_states.chunk(2, dim=0)
+                with torch.no_grad():
+                    tokenized_captions = self._tokenize_captions(caption, x.device)
+                    caption_embeddings = self.frozen_prior_model.model.embed_tokens(tokenized_captions.input_ids)
+                    caption_mask = tokenized_captions.attention_mask
+                    caption_prior_output = self.frozen_prior_model(
+                        inputs_embeds=caption_embeddings,
+                        attention_mask=caption_mask,
+                        output_hidden_states=True,
+                        return_dict=True
+                    )
+                    caption_hidden_states = caption_prior_output.hidden_states[middle_layer_idx]
 
                 # Token-by-token alignment, ignoring caption paddings
                 # Normalize hidden states for cosine similarity
@@ -191,8 +193,7 @@ class LARPQuantizer(nn.Module):
                 prior_caption_alignment_loss = (1 - avg_sim).mean()
 
                 last_hidden_states = prior_output.hidden_states[-1]
-                image_last_hs = last_hidden_states[:batch_size]
-                predicted = self.prior_model_project_out(image_last_hs)
+                predicted = self.prior_model_project_out(last_hidden_states)
 
                 prior_caption_loss = torch.tensor(0.0).to(predicted.device)
         else:
