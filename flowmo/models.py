@@ -751,7 +751,7 @@ class FlowMo(nn.Module):
                 fg=self.config.model.codebook_size_for_entropy,
             )
 
-            quantized, (prior_loss, prior_caption_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices = self.quantizer(code, cond, caption, prior_stop_grad=self.config.prior.stop_grad)
+            quantized, (prior_loss, prior_caption_loss, prior_caption_alignment_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices = self.quantizer(code, cond, caption, prior_stop_grad=self.config.prior.stop_grad)
             assert quantized.shape == code.shape
             quantized = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
 
@@ -765,9 +765,11 @@ class FlowMo(nn.Module):
                 "quantizer_loss": quantizer_loss,
                 "prior_loss": prior_loss * self.config.prior.loss_weight,
                 "prior_caption_loss": prior_caption_loss * self.config.prior.caption_loss_weight,
+                "prior_caption_alignment_loss": prior_caption_alignment_loss * self.config.prior.caption_alignment_loss_weight,
             }
             aux["prior_loss_unweighted"] = prior_loss.detach()
             aux["prior_caption_loss_unweighted"] = prior_caption_loss.detach()
+            aux["prior_caption_alignment_loss_unweighted"] = prior_caption_alignment_loss.detach()
             aux["vq_commitment"] = commit_loss
             aux["vq_double_quantization"] = double_quant_loss
             aux["vq_entropy"] = entropy_aux_loss
