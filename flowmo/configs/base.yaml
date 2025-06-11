@@ -43,6 +43,7 @@ prior:
   model_name: gptc-S
   lr_multiplier: 100
   loss_weight: 0.001
+  caption_loss_weight: 0.001
   stop_grad: True
   class_dropout_prob: 0.1
   random_init: True
