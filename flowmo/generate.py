@@ -4,6 +4,8 @@ import torch
 from omegaconf import OmegaConf
 from einops import rearrange
 import torchvision.transforms as T
+from PIL import Image
+import torch.nn.functional as F
 
 # FlowMo imports
 from flowmo import train_utils, models
@@ -65,11 +67,8 @@ def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: 
         if do_cfg:
             uncond_class_emb = quantizer.prior_model_cls_embedding(torch.tensor([num_classes], device=device), train=False)
             uncond_prompt_embedding = uncond_class_emb.to(torch.bfloat16)
-        
-        # Autoregressively generate the remaining tokens
-        num_to_gen = seq_len if class_idx is not None else seq_len - 1
 
-        for _ in range(num_to_gen):
+        for _ in range(seq_len):
             # Build input embeddings tensor
             code_embeddings = codebook[torch.tensor(generated_indices, device=device)].unsqueeze(0) if generated_indices else None
 
@@ -120,11 +119,82 @@ def sample_code(model: models.FlowMo, temperature: float = 0.0, random_indices: 
 
     # Convert indices back to quantized embeddings (1, e_dim, seq_len)
     indices_tensor = torch.tensor(generated_indices, device=device).long()
+
+    print(f'indices_tensor: {indices_tensor.tolist()}')
+
     z_q = base_quantizer.get_codebook_entry(indices_tensor, shape=(1, seq_len, e_dim))
 
     # Rearrange to FlowMo code shape: (1, code_length, context_dim)
+    print(f'z_q.shape: {z_q.shape}')
     quantized_code = rearrange(z_q, "b fg (t fh) -> b t (fg fh)", t=code_length, fh=sub_tokens)
+    print(f'quantized_code.shape: {quantized_code.shape}')
     return quantized_code  # shape: (1, code_length, context_dim)
+
+
+@torch.no_grad()
+def calculate_gt_likelihood(model: models.FlowMo, gt_indices: torch.Tensor, class_idx: int = None):
+    """Calculates the negative log-likelihood of ground truth tokens using the prior model."""
+    device = next(model.parameters()).device
+    quantizer = model.quantizer
+    base_quantizer = quantizer.quantizer
+    codebook = base_quantizer.embedding.weight
+    proj_in = quantizer.prior_model_project_in
+    proj_out = quantizer.prior_model_project_out
+    
+    gt_indices_batch = gt_indices.unsqueeze(0)
+    seq_len = gt_indices_batch.shape[1]
+
+    targets = gt_indices_batch
+
+    # Prepare input for the prior model
+    prompt_embedding = None
+    if not hasattr(quantizer, 'prior_model_cls_embedding'):
+        raise AttributeError("Quantizer does not have 'prior_model_cls_embedding' for conditioning.")
+    
+    class_emb = quantizer.prior_model_cls_embedding(torch.tensor([class_idx], device=device), train=False)
+    prompt_embedding = class_emb.to(torch.bfloat16)
+    
+    # Input is [class_emb, token_0, ..., token_{N-2}]
+    # We predict all tokens from 0 to N-1
+    code_embs = codebook[gt_indices_batch[:, :-1]]
+    code_embs_proj = proj_in(code_embs).to(torch.bfloat16)
+    model_input = torch.cat([prompt_embedding, code_embs_proj], dim=1)
+    
+    # Single forward pass
+    hidden_states = quantizer.prior_model(inputs_embeds=model_input, use_cache=False, output_hidden_states=True).hidden_states[-1].to(torch.float)
+    pred_embeddings = proj_out(hidden_states)
+    
+    logits = torch.matmul(pred_embeddings, codebook.T)
+    
+    # Calculate per-token loss
+    per_token_nll = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), reduction='none')
+    nll_loss = per_token_nll.sum()
+    
+    avg_nll = nll_loss / seq_len
+    perplexity = torch.exp(avg_nll)
+    
+    per_token_prob = torch.exp(-per_token_nll)
+    avg_prob = per_token_prob.mean()
+
+    print(f"Ground Truth Likelihood Calculation:")
+    print(f"  Total Negative Log-Likelihood: {nll_loss.item():.4f}")
+    print(f"  Average NLL per token: {avg_nll.item():.4f}")
+    print(f"  Perplexity: {perplexity.item():.4f}")
+    print(f"  Average GT Token Probability: {avg_prob.item():.4f}")
+    # Calculate how many GT tokens are in top-10 predictions
+    top10_indices = torch.topk(logits.reshape(-1, logits.size(-1)), k=10, dim=-1).indices
+    gt_tokens_flat = targets.reshape(-1)
+    
+    gt_in_top10_count = 0
+    for i, gt_token in enumerate(gt_tokens_flat):
+        if gt_token in top10_indices[i]:
+            gt_in_top10_count += 1
+    
+    print(f"  GT tokens in top-10 predictions: {gt_in_top10_count}/{seq_len} ({100.0 * gt_in_top10_count / seq_len:.1f}%)")
+
+    print("\nPer-token Ground Truth Probabilities:")
+    for i, prob in enumerate(per_token_prob):
+        print(f"  Token {i:3d} (ID: {gt_indices[i]:4d}): {prob.item():.4f}")
 
 
 def save_image(tensor_image: torch.Tensor, path: str):
@@ -141,11 +211,12 @@ def main():
     parser.add_argument("--experiment-name", type=str, required=True, help="Name of the experiment folder to load.")
     parser.add_argument("--checkpoint", type=str, default="auto", help="Path to checkpoint to load; use 'auto' for latest inside experiment.")
     parser.add_argument("--output", type=str, default="generation.png", help="Filename for the generated image.")
-    parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for sampling. Use 0 for greedy decoding, >0 for stochastic sampling (default: 1.0).")
+    parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for sampling. Use 0 for greedy decoding, >0 for stochastic sampling (default: 1.0).")
     parser.add_argument("--random-indices", action="store_true", help="Generate completely random indices instead of using the prior model")
     parser.add_argument("--class-idx", type=int, help="Class index for conditional generation.")
     parser.add_argument("--cfg-scale", type=float, default=2.0, help="Classifier-Free Guidance scale. Use > 1.0 for CFG.")
     parser.add_argument("--num-classes", type=int, default=1000, help="Number of classes for CFG.")
+    parser.add_argument("--force-gt-from-image", type=str, help="Path to an image to force ground truth indices from and calculate likelihood.")
     args = parser.parse_args()
 
     exp_dir = os.path.join(args.results_dir, args.experiment_name)
@@ -170,6 +241,80 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
+
+    if args.force_gt_from_image:
+        img_path = args.force_gt_from_image
+        if not os.path.isfile(img_path):
+            raise FileNotFoundError(f"Image file not found at {img_path}")
+        
+        img = Image.open(img_path).convert("RGB")
+        
+        img_size = config.data.image_size
+        transform = T.Compose([
+            T.Resize(img_size),
+            T.CenterCrop(img_size),
+            T.ToTensor(),
+        ])
+        image_tensor = transform(img).unsqueeze(0).to(device)
+        # Normalize to [-1, 1] range as expected by the model
+        image_tensor = (image_tensor * 2.0) - 1.0
+        
+        # Save the preprocessed image
+        input_basename = os.path.basename(img_path)
+        input_name, _ = os.path.splitext(input_basename)
+        preprocessed_filename = f"{input_name}_preprocessed.jpeg"
+        
+        save_image(image_tensor[0], preprocessed_filename)
+        print(f"Preprocessed image saved to: {preprocessed_filename}")
+
+        with torch.no_grad():
+            code, _ = model.encode(image_tensor)
+            
+            b, t, f = code.shape
+            code_reshaped = rearrange(
+                code,
+                "b t (fg fh) -> b fg (t fh)",
+                fg=model.config.model.codebook_size_for_entropy,
+            )
+            
+            _, _, indices = model.quantizer.quantizer(code_reshaped)
+            gt_indices = indices.squeeze(0)
+        
+        print(f'Ground truth indices: {gt_indices}')
+
+        calculate_gt_likelihood(model, gt_indices, class_idx=args.class_idx)
+
+        # Reconstruct and save the image from ground truth indices
+        print("\nReconstructing image from ground truth indices to verify tokenizer...")
+        
+        quantizer = model.quantizer
+        base_quantizer = quantizer.quantizer
+        
+        code_length = model.code_length
+        context_dim = model.context_dim
+        e_dim = model.config.model.codebook_size_for_entropy
+        sub_tokens = context_dim // e_dim
+        seq_len = code_length * sub_tokens
+
+        # Get quantized code from ground truth indices
+        z_q = base_quantizer.get_codebook_entry(gt_indices, shape=(1, seq_len, e_dim))
+        quantized_code_from_gt = rearrange(z_q, "b fg (t fh) -> b t (fg fh)", t=code_length, fh=sub_tokens).to(device)
+
+        # Reconstruct image
+        with torch.no_grad():
+            img_size = config.data.image_size
+            dummy_image = torch.zeros((1, 3, img_size, img_size), device=device)
+            reconstructed_image = model.reconstruct(dummy_image, dtype=torch.float32, code=quantized_code_from_gt)
+        
+        # Save reconstructed image
+        input_basename = os.path.basename(img_path)
+        input_name, _ = os.path.splitext(input_basename)
+        output_filename = f"{input_name}_reconstructed.jpeg"
+        
+        save_image(reconstructed_image[0], output_filename)
+        print(f"Reconstructed image saved to: {output_filename}")
+        
+        return
 
     # Sample code tokens with specified temperature
     quantized_code = sample_code(model, temperature=args.temperature, random_indices=args.random_indices, class_idx=args.class_idx, cfg_scale=args.cfg_scale, num_classes=args.num_classes).to(device)
