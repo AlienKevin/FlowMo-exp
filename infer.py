@@ -5,13 +5,17 @@ import mediapy, einops
 from tqdm import tqdm
 
 # Choose your model
-model_name = "flowmo_hi_lfq_64x64_pretrain"
+model_name = "flowmo_hi_c2i_larp_ibq_rand_sg_prior_0.001_multiplier_10_64x64_pretrain"
 
 zoo = {
     "flowmo_hi_larp_qwen3_0.6b_rand_64x64_pretrain": 100000,
     "flowmo_hi_larp_qwen3_0.6b_64x64_pretrain": 60000,
     "flowmo_hi_larp_no_prior_loss_64x64_pretrain": 200000,
     "flowmo_hi_lfq_64x64_pretrain": 200000,
+    "flowmo_hi_c2i_larp_ibq_prior_0.001_multiplier_10_64x64_pretrain": 360000,
+    "flowmo_hi_c2i_larp_ibq_rand_prior_0.001_multiplier_10_64x64_pretrain": 360000,
+    "flowmo_hi_c2i_larp_ibq_sg_prior_0.001_multiplier_10_64x64_pretrain": 360000,
+    "flowmo_hi_c2i_larp_ibq_rand_sg_prior_0.001_multiplier_10_64x64_pretrain": 380000,
 }
 
 # Set up the data.
@@ -32,7 +36,7 @@ import os
 samples_dir = f"samples/{model_name}"
 os.makedirs(samples_dir, exist_ok=True)
 
-for ckpth_iteration in tqdm(range(20000, 200001, 20000)):
+for ckpth_iteration in tqdm([zoo[model_name]]):
     state_dict = torch.load(f"results/{model_name}/checkpoints/{ckpth_iteration:08d}.pth", map_location='cuda')
 
     model = train_utils.build_model(config)
@@ -43,7 +47,7 @@ for ckpth_iteration in tqdm(range(20000, 200001, 20000)):
 
     model.eval()
     with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
-        images_rec, _ = model.reconstruct(images)
+        images_rec, _, _ = model.reconstruct(images)
 
     image_name = f"{samples_dir}/{ckpth_iteration:08d}.png"
     mediapy.write_image(image_name, einops.rearrange(images_rec.cpu().numpy()/2+.5, "b c h w -> h (b w) c"))
