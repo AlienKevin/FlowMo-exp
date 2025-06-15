@@ -92,7 +92,7 @@ def main(args, config):
     os.makedirs(log_dir, exist_ok=True)
 
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(
-        log_dir, f"torchinductor_cache_{str(rank)}"
+        '/', 'tmp', 'kevin02', f"{args.experiment_name}_torchinductor_cache_{str(rank)}"
     )
 
     device = rank % torch.cuda.device_count()
