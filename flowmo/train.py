@@ -218,8 +218,16 @@ def main(args, config):
 
     aux_state["dl_iter"] = dl_iter
 
+    target_prior_loss_weight = config.prior.loss_weight
     while total_steps <= config.trainer.max_steps:
         model.train()
+
+        if total_steps < config.opt.freeze_encoder_after:
+            warmup_fraction = total_steps / config.opt.freeze_encoder_after
+            model.module.config.prior.loss_weight = (
+                warmup_fraction * target_prior_loss_weight
+            )
+
         if config.opt.freeze_encoder or total_steps >= config.opt.freeze_encoder_after:
             if not rebuilt_optimizer:
                 print(f"Rebuilding optimizer at step {total_steps}")
@@ -279,6 +287,7 @@ def main(args, config):
                 k: (l / config.trainer.log_every).item()
                 for (k, l) in running_losses.items()
             }
+            running_losses["prior_loss_weight"] = model.module.config.prior.loss_weight
             reserved_gb = torch.cuda.max_memory_reserved() / 1e9
             allocated_gb = torch.cuda.max_memory_allocated() / 1e9
 
@@ -317,7 +326,7 @@ def main(args, config):
                     local_checkpoint_dir, f"{total_steps:08d}.pth"
                 )
 
-                # Only save if the checkpoint file doesn’t already exist
+                # Only save if the checkpoint file doesn't already exist
                 if not os.path.exists(local_checkpoint_path):
                     torch.save(
                         {
