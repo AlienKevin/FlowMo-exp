@@ -89,12 +89,6 @@ class LARPQuantizer(nn.Module):
             model_id,
             torch_dtype="auto",
         )
-        self.frozen_prior_model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype="auto",
-        )
-        for param in self.frozen_prior_model.parameters():
-            param.requires_grad = False
         self.prior_tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.prior_tokenizer.pad_token = self.prior_tokenizer.eos_token
         if prior_config.random_init:
@@ -127,9 +121,7 @@ class LARPQuantizer(nn.Module):
         # If in eval mode, return early with quantized results and zero losses
         if not self.training:
             prior_loss = torch.tensor(0.0).to(x.device)
-            prior_caption_loss = torch.tensor(0.0).to(x.device)
-            prior_caption_alignment_loss = torch.tensor(0.0).to(x.device)
-            return quantized, (prior_loss, prior_caption_loss, prior_caption_alignment_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices
+            return quantized, (prior_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices
 
         # 2. De-quantize for AR Prior Input
         # self.quantizer.codebook is [codebook_size, codebook_dim]
@@ -145,74 +137,11 @@ class LARPQuantizer(nn.Module):
         prior_input = self.prior_model_project_in(prior_input)
         cond_embeddings = self.prior_model_cls_embedding(cond, train=self.training)
 
-        if self.config.prior.caption_loss_weight == 0:
-            if self.config.prior.caption_alignment_loss_weight == 0:
-                prior_input = torch.cat((cond_embeddings, prior_input[:, :-1, :]), dim=1)
-                prior_output = self.prior_model(inputs_embeds=prior_input, output_hidden_states=True).hidden_states[-1]
-                # predicted: [B, seq_len, codebook_dim]
-                predicted = self.prior_model_project_out(prior_output)
-                prior_caption_loss = torch.tensor(0.0).to(predicted.device)
-                prior_caption_alignment_loss = torch.tensor(0.0).to(predicted.device)
-            else:
-                image_embeddings = torch.cat((cond_embeddings, prior_input[:, :-1, :]), dim=1)
-                prior_output = self.prior_model(
-                    inputs_embeds=image_embeddings,
-                    output_hidden_states=True,
-                    return_dict=True
-                )
-                middle_layer_idx = self.prior_model.config.num_hidden_layers // 2
-                image_hidden_states = prior_output.hidden_states[middle_layer_idx]
-
-                with torch.no_grad():
-                    tokenized_captions = self._tokenize_captions(caption, x.device)
-                    caption_embeddings = self.frozen_prior_model.model.embed_tokens(tokenized_captions.input_ids)
-                    caption_mask = tokenized_captions.attention_mask
-                    caption_prior_output = self.frozen_prior_model(
-                        inputs_embeds=caption_embeddings,
-                        attention_mask=caption_mask,
-                        output_hidden_states=True,
-                        return_dict=True
-                    )
-                    caption_hidden_states = caption_prior_output.hidden_states[middle_layer_idx]
-
-                image_hs_pooled = image_hidden_states.mean(dim=1)
-
-                # Masked pooling for captions
-                input_mask_expanded = caption_mask.unsqueeze(-1)
-                sum_embeddings = (caption_hidden_states * input_mask_expanded).sum(dim=1)
-                sum_mask = torch.clamp(input_mask_expanded.sum(dim=1), min=1e-9)
-                caption_hs_pooled = sum_embeddings / sum_mask
-
-                prior_caption_alignment_loss = (1 - F.cosine_similarity(image_hs_pooled, caption_hs_pooled, dim=-1)).mean()
-
-                last_hidden_states = prior_output.hidden_states[-1]
-                predicted = self.prior_model_project_out(last_hidden_states)
-
-                prior_caption_loss = torch.tensor(0.0).to(predicted.device)
-        else:
-            tokenized_captions = self._tokenize_captions(caption, x.device)
-            caption_embeddings = self.prior_model.model.embed_tokens(tokenized_captions.input_ids)
-            caption_len = caption_embeddings.shape[1]
-
-            caption_mask = tokenized_captions.attention_mask
-            other_mask = torch.ones(batch_size, 1 + prior_input.shape[1], dtype=torch.long, device=x.device)
-            attention_mask = torch.cat((other_mask, caption_mask), dim=1)
-
-            prior_input = torch.cat((cond_embeddings, prior_input, caption_embeddings), dim=1)
-            prior_output = self.prior_model(inputs_embeds=prior_input, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
-            prior_hidden_states = prior_output.hidden_states[-1]
-            prior_caption_logits = prior_output.logits[:, -caption_len:, :]
-            caption_loss_logits = prior_caption_logits[:, :-1, :].contiguous()
-            caption_labels = tokenized_captions.input_ids[:, 1:].contiguous()
-            prior_caption_loss = F.cross_entropy(
-                caption_loss_logits.view(-1, self.prior_model.config.vocab_size),
-                caption_labels.view(-1),
-                ignore_index=self.prior_tokenizer.pad_token_id
-            )
-            # predicted: [B, seq_len, codebook_dim]
-            predicted = self.prior_model_project_out(prior_hidden_states[:, :-caption_len-1, :])
-            prior_caption_alignment_loss = torch.tensor(0.0).to(predicted.device)
-    
+        prior_input = torch.cat((cond_embeddings, prior_input[:, :-1, :]), dim=1)
+        prior_output = self.prior_model(inputs_embeds=prior_input, output_hidden_states=True).hidden_states[-1]
+        # predicted: [B, seq_len, codebook_dim]
+        predicted = self.prior_model_project_out(prior_output)
+        
         # # 4. Calculate NLL loss (Lprior)
         logits = torch.einsum('btd,cd->btc', predicted, codebook)
         
@@ -223,4 +152,4 @@ class LARPQuantizer(nn.Module):
             prior_target_indices.reshape(-1)          # [B*(T-1)]
         )
 
-        return quantized, (prior_loss, prior_caption_loss, prior_caption_alignment_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices
+        return quantized, (prior_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices
