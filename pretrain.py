@@ -7,6 +7,31 @@ from torch.utils.data import DataLoader
 from datasets import Dataset
 import json
 import random
+from omegaconf import OmegaConf
+from flowmo import train_utils
+import torchvision
+from einops import rearrange
+import numpy as np
+from transformers import LogitsProcessor
+
+
+def seed_everything(seed=42):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+class FilterLogitsProcessor(LogitsProcessor):
+    def __init__(self, filter_vocab_size: int):
+        self.filter_vocab_size = filter_vocab_size
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        scores[:, self.filter_vocab_size:] = -float("Inf")
+        return scores
 
 
 class SFTTrainer:
@@ -31,6 +56,13 @@ class SFTTrainer:
 
         unique_classes = sorted(class_data.keys())
         self.class_to_idx = {c: i for i, c in enumerate(unique_classes)}
+        
+        with open('imagenet_class_index.json', 'r') as f:
+            imagenet_class_index = json.load(f)
+        
+        self.class_id_to_name = {}
+        for _, info in imagenet_class_index.items():
+            self.class_id_to_name[info[0]] = info[1]
         
         train_items = []
         val_items = []
@@ -87,8 +119,16 @@ class SFTTrainer:
         self.train_dataset.set_format(type='torch', columns=['input_ids'])
         self.val_dataset.set_format(type='torch', columns=['input_ids'])
 
-        self.train_dataloader = DataLoader(self.train_dataset, batch_size=self.batch_size, pin_memory=True, shuffle=True)
-        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True)
+        def seed_worker(worker_id):
+            worker_seed = torch.initial_seed() % 2**32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+
+        g = torch.Generator()
+        g.manual_seed(42)
+
+        self.train_dataloader = DataLoader(self.train_dataset, batch_size=self.batch_size, pin_memory=True, shuffle=True, worker_init_fn=seed_worker, generator=g)
+        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, worker_init_fn=seed_worker, generator=g)
         print(self.train_dataset)
         print(self.val_dataset)
 
@@ -96,7 +136,22 @@ class SFTTrainer:
         lr = 1e-4
         self.optimizer = AdamW(self.model.parameters(), lr=lr)
 
+        # Load decoder model for generation
+        decoder_model_name = "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain"
+        decoder_ckpth_iteration = 150000
+        config_path = f'results/{decoder_model_name}/config.yaml'
+        self.decoder_config = OmegaConf.load(config_path)
+        checkpoint_path = f"results/{decoder_model_name}/checkpoints/{decoder_ckpth_iteration:08d}.pth"
+        
+        self.decoder_model = train_utils.build_model(self.decoder_config)
+        state_dict = torch.load(checkpoint_path, map_location='cuda')
+        self.decoder_model.load_state_dict(state_dict['model_ema_state_dict'], strict=False)
+        self.decoder_model.eval()
+        self.decoder_model.cuda()
+        self.num_visual_tokens = num_visual_tokens
+
     def eval(self):
+        seed_everything(42)
         self.model.eval()
         total_loss = 0
         with torch.no_grad():
@@ -113,9 +168,77 @@ class SFTTrainer:
                 total_loss += loss.item()
         
         avg_loss = total_loss / len(self.val_dataloader)
-        return {"val/loss": avg_loss}
+        metrics = {"val/loss": avg_loss}
+
+        # Generation
+        self.decoder_model.eval()
+
+        num_samples_per_class = 4
+        columns = ["class_id", "class_name"] + [f"sample_{i}" for i in range(num_samples_per_class)]
+        table = wandb.Table(columns=columns)
+        
+        val_generation_class_ids = sorted(list(self.class_to_idx.keys()))
+
+        logits_processor = [FilterLogitsProcessor(self.num_visual_tokens)]
+
+        with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
+            class_tokens = [self.num_visual_tokens + self.class_to_idx[class_id] for class_id in val_generation_class_ids]
+
+            for i in tqdm(range(0, len(class_tokens), self.batch_size), desc="Generating images"):
+                batch_class_tokens = class_tokens[i:i+self.batch_size]
+                batch_class_ids = val_generation_class_ids[i:i+self.batch_size]
+                
+                prompts = torch.tensor(batch_class_tokens, device=self.device).unsqueeze(1)
+                attention_mask = torch.ones_like(prompts)
+                
+                generated_sequences = self.model.generate(
+                    prompts,
+                    attention_mask=attention_mask,
+                    max_length=self.model.config.n_ctx,
+                    num_return_sequences=num_samples_per_class,
+                    do_sample=True,
+                    top_k=0,
+                    top_p=1.0,
+                    temperature=1.0,
+                    logits_processor=logits_processor,
+                )
+                
+                visual_tokens = generated_sequences[:, 1:]
+
+                code_length = self.decoder_config.model.code_length
+                context_dim = self.decoder_config.model.context_dim
+                codebook_size_for_entropy = self.decoder_config.model.codebook_size_for_entropy
+                fh = context_dim // codebook_size_for_entropy
+                seq_len = code_length * fh
+
+                indices = visual_tokens
+                total_images_in_batch = indices.shape[0]
+                shape = (total_images_in_batch, seq_len, codebook_size_for_entropy)
+                
+                quantized = self.decoder_model.quantizer.quantizer.get_codebook_entry(indices, shape)
+                code = rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=code_length, fh=fh)
+
+                reconstructed_images = self.decoder_model.reconstruct(images=torch.zeros(total_images_in_batch, 3, self.decoder_config.data.image_size, self.decoder_config.data.image_size).cuda(), code=code)
+                reconstructed_images = (reconstructed_images + 1.0) / 2.0
+                reconstructed_images.clamp_(0, 1)
+
+                img_idx = 0
+                for class_id in batch_class_ids:
+                    class_name = self.class_id_to_name[class_id]
+                    row = [class_id, class_name]
+                    for _ in range(num_samples_per_class):
+                        image = torchvision.transforms.ToPILImage()(reconstructed_images[img_idx])
+                        row.append(wandb.Image(image))
+                        img_idx += 1
+                    table.add_data(*row)
+        
+        metrics["val/generations"] = table
+        return metrics
 
     def train(self):
+        eval_metrics = self.eval()
+        self.logger.log(eval_metrics)
+        
         for epoch in range(self.epochs):
             self.model.train()
             epoch_loss = 0
@@ -148,7 +271,7 @@ class SFTTrainer:
                 self.optimizer.zero_grad()
                 self.logger.log({"epoch": epoch, "train/loss": micro_batch_loss, "train/grad_norm": grad_norm.item()})
 
-            if ((epoch + 1) % 10 == 0) or (epoch == self.epochs - 1):
+            if (epoch == 0) or ((epoch + 1) % 10 == 0) or (epoch == self.epochs - 1):
                 model_save_path = os.path.join(self.ckpt_dir, f'sft_epoch_{epoch}')
                 save_model(self.model, model_save_path)
 
@@ -178,5 +301,6 @@ def save_model(model, model_save_path) -> None:
 
 
 if __name__ == "__main__":
-    sft_trainer = SFTTrainer(entity='kevinxli', project_name='dog_imagenet_gpt2', epochs=100, batch_size=256)
+    seed_everything(42)
+    sft_trainer = SFTTrainer(entity='kevinxli', project_name='dog_imagenet_gpt2', epochs=200, batch_size=256)
     sft_trainer.train()
