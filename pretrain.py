@@ -137,21 +137,16 @@ class SFTTrainer:
                 micro_batch_loss = loss.item()
                 epoch_loss += micro_batch_loss
 
-                loss = loss / self.gradient_accumulation_steps
-
                 # Backward step
                 loss.backward()
 
-                if (idx + 1) % self.gradient_accumulation_steps == 0:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        self.max_grad_norm,
-                    )
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-                    self.logger.log({"epoch": epoch, "train/loss": micro_batch_loss, "train/grad_norm": grad_norm.item()})
-                else:
-                    self.logger.log({"epoch": epoch, "train/loss": micro_batch_loss})
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.max_grad_norm,
+                )
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                self.logger.log({"epoch": epoch, "train/loss": micro_batch_loss, "train/grad_norm": grad_norm.item()})
 
             if ((epoch + 1) % 10 == 0) or (epoch == self.epochs - 1):
                 model_save_path = os.path.join(self.ckpt_dir, f'sft_epoch_{epoch}')
