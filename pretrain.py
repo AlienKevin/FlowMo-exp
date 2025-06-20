@@ -1,5 +1,9 @@
 from torch.optim import AdamW
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 import wandb
 import os
@@ -35,9 +39,19 @@ class FilterLogitsProcessor(LogitsProcessor):
 
 
 class SFTTrainer:
-    def __init__(self, entity='kevinxli', project_name='sft', batch_size=256, epochs=100, max_grad_norm=1.0):
+    def __init__(self, rank, world_size, local_rank, entity='kevinxli', project_name='sft', batch_size=256, epochs=100, max_grad_norm=1.0):
+        self.rank = rank
+        self.world_size = world_size
+        self.device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(self.device)
+
         self.ckpt_dir = f"./ckpts/{project_name}"
-        self.logger = wandb.init(entity=entity, project=project_name, name=f'batch_size_{batch_size}_epochs_{epochs}')
+        if self.rank == 0:
+            total_batch_size = batch_size * world_size
+            self.logger = wandb.init(entity=entity, project=project_name, name=f'batch_size_{total_batch_size}_epochs_{epochs}')
+        else:
+            self.logger = None
+
         self.epochs = epochs
         self.batch_size = batch_size
         self.max_grad_norm = max_grad_norm
@@ -74,8 +88,9 @@ class SFTTrainer:
             val_items.extend(class_items[:val_split_idx])
             train_items.extend(class_items[val_split_idx:])
 
-        print(f'Train items: {len(train_items)}')
-        print(f'Validation items: {len(val_items)}')
+        if self.rank == 0:
+            print(f'Train items: {len(train_items)}')
+            print(f'Validation items: {len(val_items)}')
         
         train_dataset = Dataset.from_list(train_items)
         val_dataset = Dataset.from_list(val_items)
@@ -86,27 +101,40 @@ class SFTTrainer:
             all_tokens.update(item['tokens'])
         
         all_tokens = sorted(list(all_tokens))
-        num_visual_tokens = len(all_tokens)
-        num_class_tokens = len(self.class_to_idx)
+        self.num_visual_tokens = len(all_tokens)
+        self.num_class_tokens = len(self.class_to_idx)
         
-        print(f'Number of unique visual tokens: {num_visual_tokens}')
-        print(f'Number of class tokens: {num_class_tokens}')
-        num_visual_tokens = 2 ** 9
-        print(f'Number of visual tokens set to: {num_visual_tokens}')
+        if self.rank == 0:
+            print(f'Number of unique visual tokens: {self.num_visual_tokens}')
+            print(f'Number of class tokens: {self.num_class_tokens}')
+        
+        # Check if the visual tokens are within the expected range
+        expected_num_visual_tokens = 2 ** 9
+        max_token_id = max(all_tokens) if all_tokens else -1
+        if max_token_id >= expected_num_visual_tokens:
+            raise ValueError(f"Max token ID {max_token_id} is out of range for the expected number of visual tokens {expected_num_visual_tokens}.")
+        
+        self.num_visual_tokens = expected_num_visual_tokens
+        if self.rank == 0:
+            print(f'Number of visual tokens set to: {self.num_visual_tokens}')
 
         n_ctx = 257
 
-        print(f"Setting context length to {n_ctx}")
+        if self.rank == 0:
+            print(f"Setting context length to {n_ctx}")
 
-        self.model = init_gpt(vocab_size=num_visual_tokens+num_class_tokens, n_ctx=n_ctx)
-        self.device = self.model.device
+        model = init_gpt(vocab_size=self.num_visual_tokens+self.num_class_tokens+1, n_ctx=n_ctx, device=self.device)
+        if self.world_size > 1:
+            self.model = DDP(model, device_ids=[self.rank])
+        else:
+            self.model = model
 
         def preprocess(batch):
             input_ids_list = []
 
             for i in range(len(batch['tokens'])):
                 class_id = batch['image_name'][i].split('_')[0]
-                class_token = num_visual_tokens + self.class_to_idx[class_id]
+                class_token = self.num_visual_tokens + self.class_to_idx[class_id]
                 token_ids = [class_token] + batch['tokens'][i]
                 input_ids_list.append(token_ids)
 
@@ -127,10 +155,21 @@ class SFTTrainer:
         g = torch.Generator()
         g.manual_seed(42)
 
-        self.train_dataloader = DataLoader(self.train_dataset, batch_size=self.batch_size, pin_memory=True, shuffle=True, worker_init_fn=seed_worker, generator=g)
-        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, worker_init_fn=seed_worker, generator=g)
-        print(self.train_dataset)
-        print(self.val_dataset)
+        if self.world_size > 1:
+            train_sampler = DistributedSampler(self.train_dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
+            val_sampler = DistributedSampler(self.val_dataset, num_replicas=self.world_size, rank=self.rank, shuffle=False)
+            shuffle_train = False
+        else:
+            train_sampler = None
+            val_sampler = None
+            shuffle_train = True
+
+        self.train_dataloader = DataLoader(self.train_dataset, batch_size=self.batch_size, pin_memory=True, worker_init_fn=seed_worker, generator=g, sampler=train_sampler, shuffle=shuffle_train)
+        self.val_dataloader = DataLoader(self.val_dataset, batch_size=self.batch_size, pin_memory=True, worker_init_fn=seed_worker, generator=g, sampler=val_sampler)
+        
+        if self.rank == 0:
+            print(self.train_dataset)
+            print(self.val_dataset)
 
         # Get optimizer
         lr = 1e-4
@@ -147,15 +186,14 @@ class SFTTrainer:
         state_dict = torch.load(checkpoint_path, map_location='cuda')
         self.decoder_model.load_state_dict(state_dict['model_ema_state_dict'], strict=False)
         self.decoder_model.eval()
-        self.decoder_model.cuda()
-        self.num_visual_tokens = num_visual_tokens
+        self.decoder_model.to(self.device)
 
     def eval(self):
         seed_everything(42)
         self.model.eval()
         total_loss = 0
         with torch.no_grad():
-            for batch in tqdm(self.val_dataloader, desc="Evaluating"):
+            for batch in tqdm(self.val_dataloader, desc="Evaluating", disable=self.rank != 0):
                 input_ids = batch["input_ids"].to(self.device)
                 labels = input_ids.clone()
 
@@ -168,83 +206,104 @@ class SFTTrainer:
                 total_loss += loss.item()
         
         avg_loss = total_loss / len(self.val_dataloader)
+        if self.world_size > 1:
+            loss_tensor = torch.tensor(avg_loss).to(self.device)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
+            avg_loss = loss_tensor.item()
+        
         metrics = {"val/loss": avg_loss}
 
-        # Generation
-        self.decoder_model.eval()
+        if self.rank == 0:
+            # Generation
+            self.decoder_model.eval()
 
-        num_samples_per_class = 4
-        columns = ["class_id", "class_name"] + [f"sample_{i}" for i in range(num_samples_per_class)]
-        table = wandb.Table(columns=columns)
-        
-        val_generation_class_ids = sorted(list(self.class_to_idx.keys()))
+            num_samples_per_class = 4
+            columns = ["class_id", "class_name"] + [f"sample_{i}" for i in range(num_samples_per_class)]
+            table = wandb.Table(columns=columns)
+            
+            val_generation_class_ids = sorted(list(self.class_to_idx.keys()))
 
-        logits_processor = [FilterLogitsProcessor(self.num_visual_tokens)]
+            logits_processor = [FilterLogitsProcessor(self.num_visual_tokens)]
+            
+            model_for_generation = self.model.module if self.world_size > 1 else self.model
 
-        with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
-            class_tokens = [self.num_visual_tokens + self.class_to_idx[class_id] for class_id in val_generation_class_ids]
+            with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
+                class_tokens = [self.num_visual_tokens + self.class_to_idx[class_id] for class_id in val_generation_class_ids]
 
-            for i in tqdm(range(0, len(class_tokens), self.batch_size), desc="Generating images"):
-                batch_class_tokens = class_tokens[i:i+self.batch_size]
-                batch_class_ids = val_generation_class_ids[i:i+self.batch_size]
-                
-                prompts = torch.tensor(batch_class_tokens, device=self.device).unsqueeze(1)
-                attention_mask = torch.ones_like(prompts)
-                
-                generated_sequences = self.model.generate(
-                    prompts,
-                    attention_mask=attention_mask,
-                    max_length=self.model.config.n_ctx,
-                    num_return_sequences=num_samples_per_class,
-                    do_sample=True,
-                    top_k=0,
-                    top_p=1.0,
-                    temperature=1.0,
-                    logits_processor=logits_processor,
-                )
-                
-                visual_tokens = generated_sequences[:, 1:]
+                for i in tqdm(range(0, len(class_tokens), self.batch_size), desc="Generating images"):
+                    batch_class_tokens = class_tokens[i:i+self.batch_size]
+                    batch_class_ids = val_generation_class_ids[i:i+self.batch_size]
+                    
+                    prompts = torch.tensor(batch_class_tokens, device=self.device).unsqueeze(1)
+                    attention_mask = torch.ones_like(prompts)
+                    
+                    generated_sequences = model_for_generation.generate(
+                        prompts,
+                        attention_mask=attention_mask,
+                        max_length=model_for_generation.config.n_ctx,
+                        num_return_sequences=num_samples_per_class,
+                        do_sample=True,
+                        top_k=0,
+                        top_p=1.0,
+                        temperature=1.0,
+                        logits_processor=logits_processor,
+                    )
+                    
+                    visual_tokens = generated_sequences[:, 1:]
 
-                code_length = self.decoder_config.model.code_length
-                context_dim = self.decoder_config.model.context_dim
-                codebook_size_for_entropy = self.decoder_config.model.codebook_size_for_entropy
-                fh = context_dim // codebook_size_for_entropy
-                seq_len = code_length * fh
+                    code_length = self.decoder_config.model.code_length
+                    context_dim = self.decoder_config.model.context_dim
+                    codebook_size_for_entropy = self.decoder_config.model.codebook_size_for_entropy
+                    fh = context_dim // codebook_size_for_entropy
+                    seq_len = code_length * fh
 
-                indices = visual_tokens
-                total_images_in_batch = indices.shape[0]
-                shape = (total_images_in_batch, seq_len, codebook_size_for_entropy)
-                
-                quantized = self.decoder_model.quantizer.quantizer.get_codebook_entry(indices, shape)
-                code = rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=code_length, fh=fh)
+                    indices = visual_tokens
+                    total_images_in_batch = indices.shape[0]
+                    shape = (total_images_in_batch, seq_len, codebook_size_for_entropy)
+                    
+                    quantized = self.decoder_model.quantizer.quantizer.get_codebook_entry(indices, shape)
+                    code = rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=code_length, fh=fh)
 
-                reconstructed_images = self.decoder_model.reconstruct(images=torch.zeros(total_images_in_batch, 3, self.decoder_config.data.image_size, self.decoder_config.data.image_size).cuda(), code=code)
-                reconstructed_images = (reconstructed_images + 1.0) / 2.0
-                reconstructed_images.clamp_(0, 1)
+                    reconstructed_images = self.decoder_model.reconstruct(images=torch.zeros(total_images_in_batch, 3, self.decoder_config.data.image_size, self.decoder_config.data.image_size).cuda(), code=code)
+                    reconstructed_images = (reconstructed_images + 1.0) / 2.0
+                    reconstructed_images.clamp_(0, 1)
 
-                img_idx = 0
-                for class_id in batch_class_ids:
-                    class_name = self.class_id_to_name[class_id]
-                    row = [class_id, class_name]
-                    for _ in range(num_samples_per_class):
-                        image = torchvision.transforms.ToPILImage()(reconstructed_images[img_idx])
-                        row.append(wandb.Image(image))
-                        img_idx += 1
-                    table.add_data(*row)
-        
-        metrics["val/generations"] = table
+                    img_idx = 0
+                    for class_id in batch_class_ids:
+                        class_name = self.class_id_to_name[class_id]
+                        row = [class_id, class_name]
+                        for _ in range(num_samples_per_class):
+                            image = torchvision.transforms.ToPILImage()(reconstructed_images[img_idx])
+                            row.append(wandb.Image(image))
+                            img_idx += 1
+                        table.add_data(*row)
+            
+            metrics["val/generations"] = table
+
         return metrics
 
     def train(self):
         eval_metrics = self.eval()
-        self.logger.log(eval_metrics)
+        if self.rank == 0:
+            self.logger.log(eval_metrics)
+        if self.world_size > 1:
+            dist.barrier()
         
         for epoch in range(self.epochs):
             self.model.train()
+            if self.world_size > 1:
+                self.train_dataloader.sampler.set_epoch(epoch)
             epoch_loss = 0
             self.optimizer.zero_grad()
-            for idx, batch in enumerate(tqdm(self.train_dataloader)):
+            for idx, batch in enumerate(tqdm(self.train_dataloader, disable=self.rank != 0)):
                 input_ids = batch["input_ids"].to(self.device)
+                # Randomly replace first class token with null token (num_classes) with probability 0.1
+                batch_size = input_ids.shape[0]
+                # Create random mask for class token dropout
+                dropout_mask = torch.rand(batch_size, device=input_ids.device) < 0.1
+                # Replace first token (class token) with null token where mask is True
+                # # null token is at the end of class tokens
+                input_ids[dropout_mask, 0] = self.num_visual_tokens + self.num_class_tokens
                 labels = input_ids.clone()
 
                 # print(f"input_ids max: {input_ids.max().item()}, min: {input_ids.min().item()}")
@@ -269,29 +328,44 @@ class SFTTrainer:
                 )
                 self.optimizer.step()
                 self.optimizer.zero_grad()
-                self.logger.log({"epoch": epoch, "train/loss": micro_batch_loss, "train/grad_norm": grad_norm.item()})
+                if self.rank == 0:
+                    self.logger.log({"epoch": epoch, "train/loss": micro_batch_loss, "train/grad_norm": grad_norm.item()})
 
-            if (epoch == 0) or ((epoch + 1) % 10 == 0) or (epoch == self.epochs - 1):
-                model_save_path = os.path.join(self.ckpt_dir, f'sft_epoch_{epoch}')
-                save_model(self.model, model_save_path)
+            if self.rank == 0:
+                if (epoch == 0) or ((epoch + 1) % 10 == 0) or (epoch == self.epochs - 1):
+                    model_save_path = os.path.join(self.ckpt_dir, f'sft_epoch_{epoch}')
+                    model_to_save = self.model.module if self.world_size > 1 else self.model
+                    save_model(model_to_save, model_save_path)
 
             eval_metrics = self.eval()
-            eval_metrics.update({"epoch": epoch, "train/epoch_loss": epoch_loss})
-            self.logger.log(eval_metrics)
+            
+            if self.world_size > 1:
+                epoch_loss_tensor = torch.tensor(epoch_loss).to(self.device)
+                dist.all_reduce(epoch_loss_tensor, op=dist.ReduceOp.AVG)
+                epoch_loss = epoch_loss_tensor.item()
 
-        self.logger.finish()
+            if self.rank == 0:
+                eval_metrics.update({"epoch": epoch, "train/epoch_loss": epoch_loss})
+                self.logger.log(eval_metrics)
+            
+            if self.world_size > 1:
+                dist.barrier()
+
+        if self.rank == 0:
+            self.logger.finish()
 
 
-def init_gpt(vocab_size, n_ctx=257):
+def init_gpt(vocab_size, n_ctx=257, device='cuda:0'):
     from transformers import GPT2LMHeadModel, AutoConfig
     config = AutoConfig.from_pretrained(
         "gpt2",
         vocab_size=vocab_size,
         n_ctx=n_ctx,
     )
-    model = GPT2LMHeadModel(config).cuda()
+    model = GPT2LMHeadModel(config).to(device)
     model_size = sum(t.numel() for t in model.parameters())
-    print(f"GPT-2 size: {model_size/1000**2:.1f}M parameters")
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        print(f"GPT-2 size: {model_size/1000**2:.1f}M parameters")
     return model
 
 
@@ -300,7 +374,61 @@ def save_model(model, model_save_path) -> None:
     model.save_pretrained(model_save_path)
 
 
-if __name__ == "__main__":
+def setup():
+    os.environ['MASTER_ADDR'] = os.environ.get('MASTER_ADDR', 'localhost')
+    os.environ['MASTER_PORT'] = os.environ.get('MASTER_PORT', '12355')
+    dist.init_process_group("nccl")
+
+
+def cleanup():
+    dist.destroy_process_group()
+
+
+def main_worker(project_name, epochs, batch_size):
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    if world_size > 1:
+        # It's important to set the device before initializing the SFTTrainer
+        # because SFTTrainer uses the device to move the model to the correct GPU.
+        # torchrun will set LOCAL_RANK for each process.
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        torch.cuda.set_device(local_rank)
+        setup()
+        rank = dist.get_rank()
+    else:
+        rank = 0
+        local_rank = 0
+
     seed_everything(42)
-    sft_trainer = SFTTrainer(entity='kevinxli', project_name='dog_imagenet_gpt2', epochs=200, batch_size=256)
+
+    sft_trainer = SFTTrainer(
+        rank=rank,
+        world_size=world_size,
+        local_rank=local_rank,
+        entity='kevinxli',
+        project_name=project_name,
+        epochs=epochs,
+        batch_size=batch_size
+    )
     sft_trainer.train()
+    
+    if world_size > 1:
+        cleanup()
+
+
+if __name__ == "__main__":
+    project_name = 'dog_imagenet_gpt2'
+    epochs = 200
+    total_batch_size = 256
+    
+    # Rely on environment variables set by the launcher (e.g., torchrun)
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    if world_size > 1:
+        print(f"Using {world_size} GPUs for DDP training.")
+        per_gpu_batch_size = total_batch_size // world_size
+    else:
+        print("Running on a single GPU.")
+        per_gpu_batch_size = total_batch_size
+    
+    main_worker(project_name, epochs, per_gpu_batch_size)
