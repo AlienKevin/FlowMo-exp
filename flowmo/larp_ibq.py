@@ -119,7 +119,7 @@ class LARPQuantizer(nn.Module):
         quantized, (commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices = self.quantizer(x)
 
         # If in eval mode, return early with quantized results and zero losses
-        if not self.training:
+        if not self.training or self.config.prior.loss_weight == 0:
             prior_loss = torch.tensor(0.0).to(x.device)
             return quantized, (prior_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices
 

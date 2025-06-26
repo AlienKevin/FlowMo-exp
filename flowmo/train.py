@@ -1,10 +1,14 @@
 """FlowMo train script."""
 
-import contextlib
 import glob
 import os
 import shutil
 import time
+import sys
+import json
+
+# Add project root to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import fsspec
 import lpips
@@ -13,8 +17,8 @@ import torch.distributed as dist
 import torch.optim as optim
 from mup import MuAdam, MuAdamW
 from omegaconf import OmegaConf
-from torch.nn.parallel import DistributedDataParallel
 from torch.utils.tensorboard import SummaryWriter
+import deepspeed
 
 from flowmo import models, perceptual_loss, train_utils
 
@@ -37,44 +41,22 @@ def train_step(config, model, batch, optimizer, aux_state):
     dtype = torch.bfloat16 if BFLOAT16_IS_AVAILABLE else torch.float32
 
     aux = {"loss_dict": {}}
-    total_loss = 0
+    model.zero_grad()
 
-    optimizer.zero_grad()
-    b = batch["image"].shape[0]
-    chunksize = b // config.opt.n_grad_acc
-    batch_chunks = [
-        {k: v[i * chunksize : (i + 1) * chunksize] for (k, v) in batch.items()}
-        for i in range(config.opt.n_grad_acc)
-    ]
+    with torch.autocast(
+        "cuda",
+        dtype=dtype,
+    ):
+        loss, aux = models.rf_loss(config, model, batch, aux_state)
 
-    total_loss = 0.0
-    assert len(batch_chunks) == config.opt.n_grad_acc
-    for i, batch_chunk in enumerate(batch_chunks):
-        with (
-            contextlib.nullcontext()
-            if i == config.opt.n_grad_acc - 1
-            else model.no_sync()
-        ):
-            with torch.autocast(
-                "cuda",
-                dtype=dtype,
-            ):
-                loss, aux = models.rf_loss(config, model, batch_chunk, aux_state)
-                loss = loss / config.opt.n_grad_acc
-
-            loss.backward()
-            total_loss += loss.detach()
-
-    original_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    model.backward(loss)
 
     if config.opt.log_norms:
-        clipped_grad_norm = _get_norm(model, getter=lambda p: p.grad)
-        aux["loss_dict"]["debug/original_grad_norm"] = original_grad_norm
-        aux["loss_dict"]["debug/clipped_grad_norm"] = clipped_grad_norm
-        aux["loss_dict"]["debug/param_norm"] = _get_norm(model, getter=lambda p: p)
+        # This is not easily supported in ZeRO-3
+        pass
 
-    optimizer.step()
-    return total_loss, aux
+    model.step()
+    return loss.detach(), aux
 
 
 def main(args, config):
@@ -82,7 +64,8 @@ def main(args, config):
     print(torch.__version__)
     models.MUP_ENABLED = config.model.enable_mup
 
-    train_utils.soft_init()
+    # train_utils.soft_init()
+    deepspeed.init_distributed()
 
     rank = dist.get_rank()
     print(rank)
@@ -98,7 +81,7 @@ def main(args, config):
     device = rank % torch.cuda.device_count()
     print(device, torch.cuda.device_count())
 
-    torch.cuda.set_device(device)
+    # torch.cuda.set_device(device) # Deepspeed handles this
 
     global BFLOAT16_IS_AVAILABLE
     BFLOAT16_IS_AVAILABLE = (
@@ -110,6 +93,9 @@ def main(args, config):
 
     model = train_utils.build_model(config)
 
+    # if BFLOAT16_IS_AVAILABLE:
+    #     model = model.to(torch.bfloat16)
+
     aux_state = {}
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -118,7 +104,7 @@ def main(args, config):
     seed = config.global_seed * dist.get_world_size() + rank
     torch.manual_seed(seed)
 
-    model = DistributedDataParallel(model, find_unused_parameters=True)
+    # model = DistributedDataParallel(model, find_unused_parameters=True)
 
     if config.model.enable_mup:
         if config.opt.weight_decay:
@@ -159,6 +145,26 @@ def main(args, config):
         return optimizer
 
     optimizer = build_optimizer([encoder_pg, decoder_pg, prior_pg, quantizer_pg])
+    
+    with open(args.deepspeed_config, 'r') as f:
+        ds_config = json.load(f)
+
+    # Inject the batch size and accumulation steps from our main config
+    ds_config['train_micro_batch_size_per_gpu'] = config.data.batch_size
+    ds_config['gradient_accumulation_steps'] = config.opt.n_grad_acc
+    
+    # We pass the config dict directly to initialize,
+    # and we nullify the config path in args to prevent
+    # deepspeed from trying to load it again.
+    args.deepspeed_config = None
+
+    model, optimizer, _, _ = deepspeed.initialize(
+        args=args,
+        model=model,
+        optimizer=optimizer,
+        config=ds_config,
+    )
+
     rebuilt_optimizer = False
 
     train_dataloader = train_utils.load_dataset(config, split='train')
@@ -223,10 +229,20 @@ def main(args, config):
         if config.opt.freeze_encoder or total_steps >= config.opt.freeze_encoder_after:
             if not rebuilt_optimizer:
                 print(f"Rebuilding optimizer at step {total_steps}")
-                prior_pg['lr'] = config.opt.lr
+                
+                # Cannot rebuild optimizer with Deepspeed, so we modify param groups
+                model.module.encoder.requires_grad_(False)
+                
+                # Freeze encoder and quantizer by setting LR to 0
+                optimizer.param_groups[0]['lr'] = 0
+                optimizer.param_groups[3]['lr'] = 0
+                
+                # Update prior LR
+                optimizer.param_groups[2]['lr'] = config.opt.lr
                 model.module.config.prior.loss_weight = 1.0
+
                 # model.module.config.prior.stop_grad = True
-                optimizer = build_optimizer([decoder_pg, prior_pg])
+                # optimizer = build_optimizer([decoder_pg, prior_pg])
                 rebuilt_optimizer = True
                 model.module.encoder.requires_grad_(False)
                 model_ema.decay = config.model.ema_decay
@@ -317,7 +333,7 @@ def main(args, config):
                     local_checkpoint_dir, f"{total_steps:08d}.pth"
                 )
 
-                # Only save if the checkpoint file doesn’t already exist
+                # Only save if the checkpoint file doesn't already exist
                 if not os.path.exists(local_checkpoint_path):
                     torch.save(
                         {
@@ -406,4 +422,5 @@ if __name__ == "__main__":
         args, config = train_utils.get_args_and_config()
         main(args, config)
     finally:
-        torch.distributed.destroy_process_group()
+        if dist.is_initialized():
+            torch.distributed.destroy_process_group()

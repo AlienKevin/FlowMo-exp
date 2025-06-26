@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --account=viscam
 #SBATCH --partition=viscam
-#SBATCH --gres=gpu:l40s:4
+#SBATCH --gres=gpu:3090:8
 #SBATCH --time=2880
-#SBATCH --cpus-per-task=64
+#SBATCH --cpus-per-task=96
 #SBATCH --job-name=rand
 #SBATCH --output=%j_output.txt
 #SBATCH --error=%j_error.txt
@@ -18,20 +18,30 @@ echo "working directory = "$SLURM_SUBMIT_DIR
 source .venv/bin/activate
 
 # Generate a random master port to avoid collision
-MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
+export MASTER_PORT=$(expr 13370 + $(echo -n $SLURM_JOBID | tail -c 4))
 echo "Using MASTER_PORT="$MASTER_PORT
 
-torchrun --nproc-per-node=4 --master_port=$MASTER_PORT -m flowmo.train \
-    --experiment-name "dogs_flowmo_lo_c2i_larp_ibq_rand_128x128_pretrain" \
-    data.imagenet_train_index="dogs_imagenet_train_index.json" \
+EXPERIMENT_NAME="flowmo_lo_c2i_larp_rand_sg_1.7b_ibq_128x128_pretrain"
+# Set cache directories to a non-NFS path to avoid slowdowns
+export TRITON_CACHE_DIR="/tmp/kevin02/${EXPERIMENT_NAME}_triton_cache"
+export TORCHINDUCTOR_CACHE_DIR="/tmp/kevin02/${EXPERIMENT_NAME}_torchinductor_cache"
+mkdir -p $TRITON_CACHE_DIR
+mkdir -p $TORCHINDUCTOR_CACHE_DIR
+
+# Disable torch.compile to debug potential compilation errors
+export TORCH_COMPILE_DISABLE=1
+
+deepspeed --num_gpus=8 --master_port $MASTER_PORT flowmo/train.py \
+    --deepspeed_config flowmo/zero3.json \
+    --experiment-name "$EXPERIMENT_NAME" \
     model.context_dim=18 model.codebook_size_for_entropy=9 model.quantization_type="larp_ibq" \
     model.patch_size=8 model.mup_width=4 model.code_length=128 \
     prior.model_name="Qwen3-0.6B" \
     prior.random_init=True \
-    prior.stop_grad=False \
+    prior.stop_grad=True \
     prior.loss_weight=0.001 \
     prior.lr_multiplier=1 \
-    data.batch_size=64 \
+    data.batch_size=16 \
     data.eval_batch_size=40 \
     data.image_size=128 \
     opt.n_grad_acc=2 \
