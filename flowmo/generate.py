@@ -107,7 +107,6 @@ def sample_code(model: models.FlowMo, temperature: float = 0.0, top_k: int = 0, 
     else:
         # Storage for generated indices
         generated_indices = []
-        generated_probs = []
 
         do_cfg = cfg_scale > 1.0 and class_idx is not None
         
@@ -164,11 +163,18 @@ def sample_code(model: models.FlowMo, temperature: float = 0.0, top_k: int = 0, 
             
             logits = logits.float()
 
-            next_idx, next_probs = sample(logits, temperature=temperature, top_k=top_k, top_p=top_p, sample_logits=temperature > 0)
-            next_idx = next_idx.item()
+            if temperature > 0:
+                # Stochastic sampling with temperature
+                scaled_logits = logits / temperature
+                probs = torch.softmax(scaled_logits, dim=-1)
+                next_idx = torch.multinomial(probs, 1).item()
+            else:
+                # Greedy decoding (temperature = 0)
+                next_idx = torch.argmax(logits, dim=-1).item()
+            
+            next_idx = sample(logits, temperature=temperature, top_k=top_k, top_p=top_p, sample_logits=temperature > 0)[0].item()
 
             generated_indices.append(next_idx)
-            generated_probs.append(next_probs)
 
     # Convert indices back to quantized embeddings (1, e_dim, seq_len)
     indices_tensor = torch.tensor(generated_indices, device=device).long()
@@ -181,45 +187,6 @@ def sample_code(model: models.FlowMo, temperature: float = 0.0, top_k: int = 0, 
     print(f'z_q.shape: {z_q.shape}')
     quantized_code = rearrange(z_q, "b fg (t fh) -> b t (fg fh)", t=code_length, fh=sub_tokens)
     print(f'quantized_code.shape: {quantized_code.shape}')
-
-    # Calculate perplexity of generated tokens
-    if generated_probs is not None and len(generated_probs) > 0:
-        # Stack all probability tensors
-        all_probs = torch.stack(generated_probs, dim=0).squeeze(1)  # Shape: [seq_len, vocab_size]
-        generated_tokens_tensor = torch.tensor(generated_indices, device=device)  # Shape: [seq_len]
-        
-        # Get the probabilities of the actual generated tokens
-        token_probs = all_probs[torch.arange(len(generated_indices)), generated_tokens_tensor]
-
-        # Print probability of each selected token
-        print(f'Token probabilities:')
-        for token_idx in range(len(generated_indices)):
-            token_id = generated_indices[token_idx]
-            token_prob = token_probs[token_idx].item()
-            print(f'  Token {token_idx}: ID={token_id}, Prob={token_prob:.6f}')
-        
-        # Count tokens in top 10 for each position
-        top_10_count = 0
-        for token_idx in range(len(generated_indices)):
-            # Get top 10 probabilities for this position
-            top_10_probs, top_10_indices = torch.topk(all_probs[token_idx], k=10)
-            selected_token = generated_tokens_tensor[token_idx]
-            
-            # Check if selected token is in top 10
-            if selected_token in top_10_indices:
-                top_10_count += 1
-        
-        print(f'{top_10_count}/{len(generated_indices)} tokens in top 10 ({100 * top_10_count / len(generated_indices):.2f}%)')
-        
-        # Calculate log probabilities and perplexity
-        log_probs = torch.log(token_probs + 1e-10)  # Add small epsilon to avoid log(0)
-        avg_log_prob = log_probs.mean()
-        perplexity = torch.exp(-avg_log_prob)
-        
-        print(f'Generated tokens perplexity: {perplexity.item():.4f}')
-    else:
-        print('No probabilities available for perplexity calculation')
-
     return quantized_code  # shape: (1, code_length, context_dim)
 
 

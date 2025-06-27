@@ -5,7 +5,7 @@ import mediapy, einops
 from tqdm import tqdm
 
 # Choose your model
-model_name = "dogs_flowmo_lo_c2i_larp_sg_ibq_128x128_pretrain"
+model_name = "flowmo_hi_c2i_larp_ibq_rand_sg_prior_0.001_multiplier_10_64x64_pretrain"
 
 zoo = {
     "flowmo_hi_larp_qwen3_0.6b_rand_64x64_pretrain": 100000,
@@ -16,54 +16,17 @@ zoo = {
     "flowmo_hi_c2i_larp_ibq_rand_prior_0.001_multiplier_10_64x64_pretrain": 360000,
     "flowmo_hi_c2i_larp_ibq_sg_prior_0.001_multiplier_10_64x64_pretrain": 360000,
     "flowmo_hi_c2i_larp_ibq_rand_sg_prior_0.001_multiplier_10_64x64_pretrain": 380000,
-    "flowmo_lo_c2i_larp_ibq_rand_128x128_pretrain": 120000,
-    "flowmo_lo_ibq_128x128_pretrain": 150000,
-    "dogs_flowmo_lo_c2i_larp_ibq_128x128_pretrain": 150000,
-    "dogs_flowmo_lo_c2i_larp_ibq_rand_128x128_pretrain": 150000,
-    "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain": 150000,
-    "dogs_flowmo_lo_c2i_larp_sg_ibq_128x128_pretrain": 150000,
 }
 
 # Set up the data.
 config = OmegaConf.load(f'results/{model_name}/config.yaml')
 config.data.batch_size = 4
 config.data.num_workers = 0
-config.data.image_size = 128
+config.data.image_size = 64
 
-# torch.manual_seed(3)
-# val_dataloader = train_utils.load_dataset(config, 'val', shuffle_val=True)
-# batch = next(train_utils.wrap_dataloader([next(iter(val_dataloader))]))
-
-import os
-from PIL import Image
-import torchvision.transforms as transforms
-
-# Load all images from ./dog_pics/
-dog_pics_dir = "./dog_pics/"
-image_files = [f for f in os.listdir(dog_pics_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))]
-
-# Create transform to match the expected format
-transform = transforms.Compose([
-    transforms.Resize((config.data.image_size, config.data.image_size)),
-    transforms.ToTensor(),
-    transforms.Lambda(lambda x: x * 2.0 - 1.0)  # Scale from [0, 1] to [-1, 1]
-])
-
-# Load and process images
-images_list = []
-for img_file in image_files:
-    img_path = os.path.join(dog_pics_dir, img_file)
-    img = Image.open(img_path).convert('RGB')
-    img_tensor = transform(img)
-    images_list.append(img_tensor)
-
-# Stack into batch
-if images_list:
-    images = torch.stack(images_list).cuda()
-    batch = {'image': images}
-else:
-    raise ValueError("No images found in ./dog_pics/ directory")
-
+torch.manual_seed(3)
+val_dataloader = train_utils.load_dataset(config, 'val', shuffle_val=True)
+batch = next(train_utils.wrap_dataloader([next(iter(val_dataloader))]))
 
 images = batch['image']
 # mediapy.show_image(einops.rearrange(images.cpu()/2+.5, "b c h w -> h (b w) c"), vmin=0, vmax=1)

@@ -9,11 +9,10 @@ from tqdm import tqdm
 
 def encode_imagenet_dogs():
     # Choose your model
-    model_name = "flowmo_lo"
+    model_name = "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain"
     
     zoo = {
         "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain": 150000,
-        "flowmo_lo": 1325000,
     }
     
     # Set up the config
@@ -57,8 +56,6 @@ def encode_imagenet_dogs():
     
     with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
         for batch_idx, batch in enumerate(tqdm(dataloader, desc="Encoding batches")):
-            if batch_idx > 2:
-                break
             images = batch['image'].cuda()
             images = images.permute(0, 3, 1, 2)
             # print(f'images.size(): {images.size()}')

@@ -45,7 +45,7 @@ class SFTTrainer:
         self.device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(self.device)
 
-        self.ckpt_dir = f"./ckpts/{project_name}_base"
+        self.ckpt_dir = f"./ckpts/{project_name}"
         if self.rank == 0:
             total_batch_size = batch_size * world_size
             self.logger = wandb.init(entity=entity, project=project_name, name=f'batch_size_{total_batch_size}_epochs_{epochs}')
@@ -332,7 +332,7 @@ class SFTTrainer:
                     self.logger.log({"epoch": epoch, "train/loss": micro_batch_loss, "train/grad_norm": grad_norm.item()})
 
             if self.rank == 0:
-                if (epoch == 0) or ((epoch + 1) % 50 == 0) or (epoch == self.epochs - 1):
+                if (epoch == 0) or ((epoch + 1) % 10 == 0) or (epoch == self.epochs - 1):
                     model_save_path = os.path.join(self.ckpt_dir, f'sft_epoch_{epoch}')
                     model_to_save = self.model.module if self.world_size > 1 else self.model
                     save_model(model_to_save, model_save_path)

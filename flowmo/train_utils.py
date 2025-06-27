@@ -23,8 +23,6 @@ def get_args_and_unknown():
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default="my_experiment")
     parser.add_argument("--resume-from-ckpt", type=str, default="")
-    parser.add_argument("--deepspeed_config", type=str, default=None)
-    parser.add_argument("--local_rank", type=int, default=-1, help="local rank passed from distributed launcher")
     
     # arguments for slurm (unused in code release)
     parser.add_argument("--account", type=str, default="")
@@ -172,7 +170,7 @@ def build_model(config):
         model = model_partial(
             **shared_kwargs,
             width=config.model.mup_width,
-        )
+        ).cuda()
 
         if config.model.enable_mup:
             print("Mup enabled!")

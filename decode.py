@@ -11,13 +11,12 @@ from einops import rearrange
 
 def decode_images():
     # Choose your model
-    model_name = "flowmo_lo"
+    model_name = "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain"
     encoded_file = f"encoded_tokens_{model_name}.json"
     output_dir = "decoded_image_samples"
 
     zoo = {
         "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain": 150000,
-        "flowmo_lo": 1325000,
     }
 
     # Set up the config
