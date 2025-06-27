@@ -52,8 +52,11 @@ def train_step(config, model, batch, optimizer, aux_state):
     model.backward(loss)
 
     if config.opt.log_norms:
-        # This is not easily supported in ZeRO-3
         pass
+        # TODO
+        # clipped_grad_norm = _get_norm(model.module, getter=lambda p: p.grad)
+        # aux["loss_dict"]["debug/clipped_grad_norm"] = clipped_grad_norm
+        # aux["loss_dict"]["debug/param_norm"] = _get_norm(model.module, getter=lambda p: p)
 
     model.step()
     return loss.detach(), aux
@@ -174,15 +177,19 @@ def main(args, config):
 
     total_steps = 0
 
-    latest_ckpt = train_utils.get_last_checkpoint(config, log_dir)
-    if latest_ckpt:
-        total_steps = train_utils.restore_from_ckpt(model.module, optimizer, path=latest_ckpt)
-    elif args.resume_from_ckpt:
-        total_steps = train_utils.restore_from_ckpt(
-            model.module, optimizer, path=args.resume_from_ckpt
-        )
+    load_dir = os.path.join(log_dir, "checkpoints")
+    if args.resume_from_ckpt:
+        # tag is the checkpoint_id. resume_from_ckpt is the full path to the checkpoint folder
+        tag = os.path.basename(args.resume_from_ckpt)
+        _, client_state = model.load_checkpoint(args.resume_from_ckpt, tag=tag)
+        total_steps = client_state['total_steps']
+    else:
+        # Try to find latest checkpoint in the default directory
+        _, client_state = model.load_checkpoint(load_dir)
+        if client_state:
+            total_steps = client_state['total_steps']
 
-    model_ema = train_utils.SimpleEMA(model.module, decay=config.model.ema_decay)
+    # model_ema = train_utils.SimpleEMA(model.module, decay=config.model.ema_decay)
 
     tic = time.time()
     dl_iter = iter(train_utils.wrap_dataloader(train_dataloader))
@@ -230,12 +237,11 @@ def main(args, config):
             if not rebuilt_optimizer:
                 print(f"Rebuilding optimizer at step {total_steps}")
                 
-                # Cannot rebuild optimizer with Deepspeed, so we modify param groups
-                model.module.encoder.requires_grad_(False)
-                
-                # Freeze encoder and quantizer by setting LR to 0
+                # Freeze all parameters in param group 0 and 3 (encoder and quantizer)
+                for param in [param for i in [0, 3] for param in optimizer.param_groups[i]['params']]:
+                    param.requires_grad = False
                 optimizer.param_groups[0]['lr'] = 0
-                optimizer.param_groups[3]['lr'] = 0
+                optimizer.param_groups[3]['lr'] = 3
                 
                 # Update prior LR
                 optimizer.param_groups[2]['lr'] = config.opt.lr
@@ -244,8 +250,7 @@ def main(args, config):
                 # model.module.config.prior.stop_grad = True
                 # optimizer = build_optimizer([decoder_pg, prior_pg])
                 rebuilt_optimizer = True
-                model.module.encoder.requires_grad_(False)
-                model_ema.decay = config.model.ema_decay
+                # model_ema.decay = config.model.ema_decay
 
         dl_tic = time.time()
         batch = next(dl_iter)
@@ -273,7 +278,7 @@ def main(args, config):
                     * initial_norms[name]
                 )
 
-        model_ema.update(model.module, step=total_steps)
+        # model_ema.update(model.module, step=total_steps)
 
         total_steps += 1
 
@@ -298,11 +303,14 @@ def main(args, config):
             reserved_gb = torch.cuda.max_memory_reserved() / 1e9
             allocated_gb = torch.cuda.max_memory_allocated() / 1e9
 
-            with torch.no_grad():
-                encoder_checksum = sum(
-                    p.mean() for p in model.module.encoder.parameters()
-                ).item()
-                running_losses["encoder_checksum"] = encoder_checksum
+            if rank == 0:
+                with torch.no_grad():
+                    # For ZeRO-2, we need to gather the parameters to calculate the checksum
+                    with deepspeed.zero.GatheredParameters(model.module.encoder.parameters()):
+                        encoder_checksum = sum(
+                            p.mean() for p in model.module.encoder.parameters()
+                        ).item()
+                        running_losses["encoder_checksum"] = encoder_checksum
 
             print(
                 dict(
@@ -325,96 +333,28 @@ def main(args, config):
             tic = time.time()
             running_losses = dict()
 
-        if rank == 0 and total_steps % config.trainer.checkpoint_every == 0:
-            if config.trainer.gs_checkpoint_bucket:
-                local_checkpoint_dir = os.path.join(log_dir, "checkpoints")
-                os.makedirs(local_checkpoint_dir, exist_ok=True)
-                local_checkpoint_path = os.path.join(
-                    local_checkpoint_dir, f"{total_steps:08d}.pth"
+        if total_steps % config.trainer.checkpoint_every == 0:
+            checkpoint_dir = os.path.join(log_dir, "checkpoints")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            checkpoint_id = "%.8d" % total_steps
+
+            model.save_checkpoint(checkpoint_dir, checkpoint_id, client_state={"total_steps": total_steps})
+
+            # Remove old checkpoints
+            if rank == 0:
+                checkpoints = sorted(glob.glob(os.path.join(checkpoint_dir, "*")))
+                for checkpoint in checkpoints[:-2]:
+                    ckpt_step = int(os.path.basename(checkpoint))
+                    if (ckpt_step % config.trainer.keep_every) != 0:
+                        shutil.rmtree(checkpoint)
+
+            print("after checkpoint save:")
+            print(
+                dict(
+                    reserved_gb=torch.cuda.max_memory_reserved() / 1e9,
+                    allocated_gb=torch.cuda.max_memory_allocated() / 1e9,
                 )
-
-                # Only save if the checkpoint file doesn't already exist
-                if not os.path.exists(local_checkpoint_path):
-                    torch.save(
-                        {
-                            "total_steps": total_steps,
-                            "model_ema_state_dict": train_utils.cpu_state_dict(
-                                model_ema.model
-                            ),
-                            "model_state_dict": train_utils.cpu_state_dict(
-                                model.module
-                            ),
-                        },
-                        local_checkpoint_path,
-                    )
-
-                gcs_checkpoint_dir = os.path.join(
-                    config.trainer.gs_checkpoint_bucket, f"{log_dir}/checkpoints"
-                )
-                fs = fsspec.filesystem("gs")
-
-                # E.g., gs://my-bucket/path-to-logs/checkpoints/00001000.pth
-                gcs_checkpoint_path = (
-                    f"{gcs_checkpoint_dir}/{os.path.basename(local_checkpoint_path)}"
-                )
-                if not fs.exists(gcs_checkpoint_path):
-                    # Upload to GCS by streaming from local file to remote
-                    with (
-                        fs.open(gcs_checkpoint_path, "wb") as gcs_file,
-                        open(local_checkpoint_path, "rb") as local_file,
-                    ):
-                        shutil.copyfileobj(local_file, gcs_file)
-                os.remove(local_checkpoint_path)
-
-                gcs_checkpoints = fs.glob(f"{gcs_checkpoint_dir}/*.pth")
-                gcs_checkpoints = sorted(gcs_checkpoints)
-                # Keep the two newest, plus any multiples of `keep_every`
-                for ckpt in gcs_checkpoints[:-2]:
-                    ckpt_step = os.path.splitext(os.path.basename(ckpt))[0]
-                    if (int(ckpt_step) % config.trainer.keep_every) != 0:
-                        fs.rm(ckpt)
-
-                print("after checkpoint save:")
-                print(
-                    dict(
-                        reserved_gb=torch.cuda.max_memory_reserved() / 1e9,
-                        allocated_gb=torch.cuda.max_memory_allocated() / 1e9,
-                    )
-                )
-            else:
-                checkpoint_dir = os.path.join(log_dir, "checkpoints")
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                checkpoint_path = os.path.join(checkpoint_dir, "%.8d.pth" % total_steps)
-
-                if not os.path.exists(checkpoint_path):
-                    torch.save(
-                        {
-                            "total_steps": total_steps,
-                            "model_ema_state_dict": train_utils.cpu_state_dict(
-                                model_ema.model
-                            ),
-                            "model_state_dict": train_utils.cpu_state_dict(
-                                model.module
-                            ),
-                        },
-                        checkpoint_path,
-                    )
-
-                # Remove old checkpoints
-                for checkpoint in sorted(
-                    glob.glob(os.path.join(checkpoint_dir, "*.pth"))
-                )[:-2]:
-                    ckpt_step, _ = os.path.basename(checkpoint).split(".")
-                    if (int(ckpt_step) % config.trainer.keep_every) != 0:
-                        os.remove(checkpoint)
-
-                print("after checkpoint save:")
-                print(
-                    dict(
-                        reserved_gb=torch.cuda.max_memory_reserved() / 1e9,
-                        allocated_gb=torch.cuda.max_memory_allocated() / 1e9,
-                    )
-                )
+            )
 
 
 if __name__ == "__main__":
