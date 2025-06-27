@@ -30,25 +30,23 @@ mkdir -p $TORCHINDUCTOR_CACHE_DIR
 
 # Disable torch.compile to debug potential compilation errors
 export TORCH_COMPILE_DISABLE=1
-# Set visible CUDA devices to 0, 1, 3, 4
-# export CUDA_VISIBLE_DEVICES=0,1,3,4
 
-deepspeed --master_port $MASTER_PORT flowmo/train.py \
-    --deepspeed_config flowmo/zero2.json \
+deepspeed --num_gpus=8 --master_port $MASTER_PORT flowmo/train.py \
+    --deepspeed_config flowmo/zero3.json \
     --experiment-name "$EXPERIMENT_NAME" \
     model.context_dim=18 model.codebook_size_for_entropy=9 model.quantization_type="larp_ibq" \
     model.patch_size=8 model.mup_width=4 model.code_length=128 \
-    prior.model_name="Qwen3-1.7B" \
+    prior.model_name="Qwen3-0.6B" \
     prior.random_init=True \
     prior.stop_grad=True \
-    prior.loss_weight=0 \
+    prior.loss_weight=0.001 \
     prior.lr_multiplier=1 \
-    data.batch_size=4 \
+    data.batch_size=16 \
     data.eval_batch_size=40 \
     data.image_size=128 \
-    opt.n_grad_acc=8 \
+    opt.n_grad_acc=2 \
     opt.lr=0.0001 \
-    opt.freeze_encoder_after=300 \
+    opt.freeze_encoder_after=50000 \
     trainer.max_steps=200000 \
-    trainer.checkpoint_every=300 \
-    trainer.keep_every=300
+    trainer.checkpoint_every=50000 \
+    trainer.keep_every=50000
