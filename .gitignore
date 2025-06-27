@@ -11,3 +11,8 @@ flowmohi_logs/
 flowmolo_logs/
 unsloth_compiled_cache/
 imagenet_train_index_overall.json
+wandb/
+decoded_image_samples/
+ckpts/
+dog_pics/
+encoded_tokens_*.json
