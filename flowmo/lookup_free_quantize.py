@@ -231,9 +231,7 @@ class LFQ(Module):
     
     def decode(self, x):
         """
-        x: ... NH
-            where NH is number of codebook heads
-            A longtensor of codebook indices, containing values from
+        x: A longtensor of codebook indices, containing values from
             0 to self.codebook_size
         """
         x = self.indices_to_bits(x)
@@ -241,7 +239,6 @@ class LFQ(Module):
         x = x.to(self.dtype)
         # -1 or 1
         x = x * 2 - 1
-        x = rearrange(x, "... NC Z-> ... (NC Z)")
         return x
 
     def forward(

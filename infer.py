@@ -5,7 +5,7 @@ import mediapy, einops
 from tqdm import tqdm
 
 # Choose your model
-model_name = "flowmo_hi_c2i_larp_ibq_rand_sg_prior_0.001_multiplier_10_64x64_pretrain"
+model_name = "e2e_h200_flowmo_lo_c2i_ibq_rand_128x128_pretrain"
 
 zoo = {
     "flowmo_hi_larp_qwen3_0.6b_rand_64x64_pretrain": 100000,
@@ -16,13 +16,14 @@ zoo = {
     "flowmo_hi_c2i_larp_ibq_rand_prior_0.001_multiplier_10_64x64_pretrain": 360000,
     "flowmo_hi_c2i_larp_ibq_sg_prior_0.001_multiplier_10_64x64_pretrain": 360000,
     "flowmo_hi_c2i_larp_ibq_rand_sg_prior_0.001_multiplier_10_64x64_pretrain": 380000,
+    "e2e_h200_flowmo_lo_c2i_ibq_rand_128x128_pretrain": 100000
 }
 
 # Set up the data.
 config = OmegaConf.load(f'results/{model_name}/config.yaml')
 config.data.batch_size = 4
 config.data.num_workers = 0
-config.data.image_size = 64
+config.data.image_size = 128
 
 torch.manual_seed(3)
 val_dataloader = train_utils.load_dataset(config, 'val', shuffle_val=True)
@@ -35,6 +36,8 @@ print('Loaded images')
 import os
 samples_dir = f"samples/{model_name}"
 os.makedirs(samples_dir, exist_ok=True)
+
+mediapy.write_image(f"{samples_dir}/target.png", einops.rearrange(images.cpu().numpy()/2+.5, "b c h w -> h (b w) c"))
 
 for ckpth_iteration in tqdm([zoo[model_name]]):
     state_dict = torch.load(f"results/{model_name}/checkpoints/{ckpth_iteration:08d}.pth", map_location='cuda')

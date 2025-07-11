@@ -17,6 +17,7 @@ import torchvision
 from einops import rearrange
 import numpy as np
 from transformers import LogitsProcessor
+import contextlib
 
 
 def seed_everything(seed=42):
@@ -39,7 +40,7 @@ class FilterLogitsProcessor(LogitsProcessor):
 
 
 class SFTTrainer:
-    def __init__(self, rank, world_size, local_rank, entity='kevinxli', project_name='sft', batch_size=256, epochs=100, max_grad_norm=1.0):
+    def __init__(self, rank, world_size, local_rank, entity='kevinxli', project_name='sft', batch_size=256, epochs=100, max_grad_norm=1.0, gradient_accumulation_steps=1):
         self.rank = rank
         self.world_size = world_size
         self.device = torch.device(f"cuda:{local_rank}")
@@ -55,8 +56,9 @@ class SFTTrainer:
         self.epochs = epochs
         self.batch_size = batch_size
         self.max_grad_norm = max_grad_norm
+        self.gradient_accumulation_steps = gradient_accumulation_steps
 
-        with open('encoded_tokens_dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain.json', 'r') as f:
+        with open('encoded_tokens_flowmo_lo.json', 'r') as f:
             data = json.load(f)
 
         items = [{'image_name': k, 'tokens': v} for k, v in data.items()]
@@ -83,7 +85,7 @@ class SFTTrainer:
 
         for class_id, class_items in class_data.items():
             random.shuffle(class_items)
-            val_split_idx = int(round(len(class_items) * 0.01))
+            val_split_idx = int(round(len(class_items) * 0.001))
             
             val_items.extend(class_items[:val_split_idx])
             train_items.extend(class_items[val_split_idx:])
@@ -109,25 +111,14 @@ class SFTTrainer:
             print(f'Number of class tokens: {self.num_class_tokens}')
         
         # Check if the visual tokens are within the expected range
-        expected_num_visual_tokens = 2 ** 9
+        self.sub_codebook_size = 2 ** 9
         max_token_id = max(all_tokens) if all_tokens else -1
-        if max_token_id >= expected_num_visual_tokens:
-            raise ValueError(f"Max token ID {max_token_id} is out of range for the expected number of visual tokens {expected_num_visual_tokens}.")
+        if max_token_id >= self.sub_codebook_size:
+            raise ValueError(f"Max token ID {max_token_id} is out of range for the expected number of visual tokens {self.sub_codebook_size}.")
         
-        self.num_visual_tokens = expected_num_visual_tokens
+        self.num_visual_tokens = self.sub_codebook_size * 2
         if self.rank == 0:
             print(f'Number of visual tokens set to: {self.num_visual_tokens}')
-
-        n_ctx = 257
-
-        if self.rank == 0:
-            print(f"Setting context length to {n_ctx}")
-
-        model = init_gpt(vocab_size=self.num_visual_tokens+self.num_class_tokens+1, n_ctx=n_ctx, device=self.device)
-        if self.world_size > 1:
-            self.model = DDP(model, device_ids=[self.rank])
-        else:
-            self.model = model
 
         def preprocess(batch):
             input_ids_list = []
@@ -135,7 +126,16 @@ class SFTTrainer:
             for i in range(len(batch['tokens'])):
                 class_id = batch['image_name'][i].split('_')[0]
                 class_token = self.num_visual_tokens + self.class_to_idx[class_id]
-                token_ids = [class_token] + batch['tokens'][i]
+                
+                original_tokens = batch['tokens'][i]
+                factorized_tokens = []
+                for j, token in enumerate(original_tokens):
+                    if j % 2 == 0: # even index
+                        factorized_tokens.append(token + self.sub_codebook_size)
+                    else:
+                        factorized_tokens.append(token)
+                
+                token_ids = [class_token] + factorized_tokens
                 input_ids_list.append(token_ids)
 
             return {
@@ -146,6 +146,17 @@ class SFTTrainer:
         self.val_dataset = val_dataset.map(preprocess, batched=True, remove_columns=val_dataset.column_names)
         self.train_dataset.set_format(type='torch', columns=['input_ids'])
         self.val_dataset.set_format(type='torch', columns=['input_ids'])
+
+        n_ctx = 513
+
+        if self.rank == 0:
+            print(f"Setting context length to {n_ctx}")
+
+        model = init_gpt(vocab_size=self.num_visual_tokens+self.num_class_tokens+1, n_ctx=n_ctx, device=self.device)
+        if self.world_size > 1:
+            self.model = DDP(model, device_ids=[self.rank])
+        else:
+            self.model = model
 
         def seed_worker(worker_id):
             worker_seed = torch.initial_seed() % 2**32
@@ -176,8 +187,8 @@ class SFTTrainer:
         self.optimizer = AdamW(self.model.parameters(), lr=lr)
 
         # Load decoder model for generation
-        decoder_model_name = "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain"
-        decoder_ckpth_iteration = 150000
+        decoder_model_name = "flowmo_lo"
+        decoder_ckpth_iteration = 1325000
         config_path = f'results/{decoder_model_name}/config.yaml'
         self.decoder_config = OmegaConf.load(config_path)
         checkpoint_path = f"results/{decoder_model_name}/checkpoints/{decoder_ckpth_iteration:08d}.pth"
@@ -217,7 +228,7 @@ class SFTTrainer:
             # Generation
             self.decoder_model.eval()
 
-            num_samples_per_class = 4
+            num_samples_per_class = 1
             columns = ["class_id", "class_name"] + [f"sample_{i}" for i in range(num_samples_per_class)]
             table = wandb.Table(columns=columns)
             
@@ -251,19 +262,34 @@ class SFTTrainer:
                     
                     visual_tokens = generated_sequences[:, 1:]
 
-                    code_length = self.decoder_config.model.code_length
-                    context_dim = self.decoder_config.model.context_dim
-                    codebook_size_for_entropy = self.decoder_config.model.codebook_size_for_entropy
-                    fh = context_dim // codebook_size_for_entropy
-                    seq_len = code_length * fh
+                    # De-factorize tokens
+                    de_factorized_tokens = visual_tokens.clone()
+                    de_factorized_tokens[:, 0::2] -= self.sub_codebook_size
 
-                    indices = visual_tokens
-                    total_images_in_batch = indices.shape[0]
-                    shape = (total_images_in_batch, seq_len, codebook_size_for_entropy)
+                    code_length = self.decoder_model.code_length
                     
-                    quantized = self.decoder_model.quantizer.quantizer.get_codebook_entry(indices, shape)
-                    code = rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=code_length, fh=fh)
+                    # Decode token ids to get the quantized vectors (-1 or 1).
+                    # The shape will be (batch_size, num_tokens, quantizer_dim)
+                    decoded_code = self.decoder_model.quantizer.decode(de_factorized_tokens)
+                    
+                    # Reshape to match the structure before the final rearrange in _quantize
+                    # The shape of `quantized` in _quantize after quantizer call is (b, d, ...)
+                    # so we permute (b, n, d) to (b, d, n)
+                    decoded_code = decoded_code.permute(0, 2, 1)
 
+                    # Rearrange back to (b, code_length, context_dim)
+                    # 'b d (t fh) -> b t (d fh)'
+                    # b = batch size
+                    # d = quantizer_dim
+                    # t = code_length
+                    # fh = (num_tokens / code_length) = (context_dim / quantizer_dim)
+                    code = rearrange(
+                        decoded_code,
+                        'b d (t fh) -> b t (d fh)',
+                        t=code_length
+                    )
+
+                    total_images_in_batch = visual_tokens.shape[0]
                     reconstructed_images = self.decoder_model.reconstruct(images=torch.zeros(total_images_in_batch, 3, self.decoder_config.data.image_size, self.decoder_config.data.image_size).cuda(), code=code)
                     reconstructed_images = (reconstructed_images + 1.0) / 2.0
                     reconstructed_images.clamp_(0, 1)
@@ -281,7 +307,6 @@ class SFTTrainer:
             metrics["val/generations"] = table
 
         return metrics
-
     def train(self):
         eval_metrics = self.eval()
         if self.rank == 0:
@@ -296,40 +321,48 @@ class SFTTrainer:
             epoch_loss = 0
             self.optimizer.zero_grad()
             for idx, batch in enumerate(tqdm(self.train_dataloader, disable=self.rank != 0)):
-                input_ids = batch["input_ids"].to(self.device)
-                # Randomly replace first class token with null token (num_classes) with probability 0.1
-                batch_size = input_ids.shape[0]
-                # Create random mask for class token dropout
-                dropout_mask = torch.rand(batch_size, device=input_ids.device) < 0.1
-                # Replace first token (class token) with null token where mask is True
-                # # null token is at the end of class tokens
-                input_ids[dropout_mask, 0] = self.num_visual_tokens + self.num_class_tokens
-                labels = input_ids.clone()
+                is_sync_step = (idx + 1) % self.gradient_accumulation_steps == 0 or (idx + 1) == len(self.train_dataloader)
+                use_no_sync = self.world_size > 1 and not is_sync_step
+                context = self.model.no_sync() if use_no_sync else contextlib.nullcontext()
 
-                # print(f"input_ids max: {input_ids.max().item()}, min: {input_ids.min().item()}")
+                with context:
+                    input_ids = batch["input_ids"].to(self.device)
+                    # Randomly replace first class token with null token (num_classes) with probability 0.1
+                    batch_size = input_ids.shape[0]
+                    # Create random mask for class token dropout
+                    dropout_mask = torch.rand(batch_size, device=input_ids.device) < 0.1
+                    # Replace first token (class token) with null token where mask is True
+                    # # null token is at the end of class tokens
+                    input_ids[dropout_mask, 0] = self.num_visual_tokens + self.num_class_tokens
+                    labels = input_ids.clone()
 
-                outputs = self.model(
-                    input_ids=input_ids,
-                    labels=labels,
-                    return_dict=True,
-                )
+                    # print(f"input_ids max: {input_ids.max().item()}, min: {input_ids.min().item()}")
 
-                # Compute loss
-                loss = outputs.loss
-                micro_batch_loss = loss.item()
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        labels=labels,
+                        return_dict=True,
+                    )
+
+                    # Compute loss
+                    loss = outputs.loss
+                    loss = loss / self.gradient_accumulation_steps
+                
+                micro_batch_loss = loss.item() * self.gradient_accumulation_steps
                 epoch_loss += micro_batch_loss
 
                 # Backward step
                 loss.backward()
 
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.max_grad_norm,
-                )
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-                if self.rank == 0:
-                    self.logger.log({"epoch": epoch, "train/loss": micro_batch_loss, "train/grad_norm": grad_norm.item()})
+                if is_sync_step:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.max_grad_norm,
+                    )
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+                    if self.rank == 0:
+                        self.logger.log({"epoch": epoch, "train/loss": micro_batch_loss, "train/grad_norm": grad_norm.item()})
 
             if self.rank == 0:
                 if (epoch == 0) or ((epoch + 1) % 10 == 0) or (epoch == self.epochs - 1):
@@ -353,7 +386,6 @@ class SFTTrainer:
 
         if self.rank == 0:
             self.logger.finish()
-
 
 def init_gpt(vocab_size, n_ctx=257, device='cuda:0'):
     from transformers import GPT2LMHeadModel, AutoConfig
@@ -384,7 +416,7 @@ def cleanup():
     dist.destroy_process_group()
 
 
-def main_worker(project_name, epochs, batch_size):
+def main_worker(project_name, epochs, batch_size, gradient_accumulation_steps):
     world_size = int(os.environ.get("WORLD_SIZE", 1))
 
     if world_size > 1:
@@ -408,7 +440,8 @@ def main_worker(project_name, epochs, batch_size):
         entity='kevinxli',
         project_name=project_name,
         epochs=epochs,
-        batch_size=batch_size
+        batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps
     )
     sft_trainer.train()
     
@@ -417,18 +450,21 @@ def main_worker(project_name, epochs, batch_size):
 
 
 if __name__ == "__main__":
-    project_name = 'dog_imagenet_gpt2'
-    epochs = 200
+    project_name = 'imagenet_gpt2'
+    epochs = 300
     total_batch_size = 256
-    
+    gradient_accumulation_steps = 2
+
     # Rely on environment variables set by the launcher (e.g., torchrun)
     world_size = int(os.environ.get("WORLD_SIZE", 1))
 
+    effective_batch_size = total_batch_size // gradient_accumulation_steps
+
     if world_size > 1:
         print(f"Using {world_size} GPUs for DDP training.")
-        per_gpu_batch_size = total_batch_size // world_size
+        per_gpu_batch_size = effective_batch_size // world_size
     else:
         print("Running on a single GPU.")
-        per_gpu_batch_size = total_batch_size
+        per_gpu_batch_size = effective_batch_size
     
-    main_worker(project_name, epochs, per_gpu_batch_size)
+    main_worker(project_name, epochs, per_gpu_batch_size, gradient_accumulation_steps)

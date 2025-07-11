@@ -7,17 +7,17 @@ from flowmo.data import IndexedTarDataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-def encode_imagenet_dogs():
+def encode_imagenet():
     # Choose your model
-    model_name = "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain"
+    model_name = "flowmo_lo"
     
     zoo = {
-        "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain": 150000,
+        "flowmo_lo": 1325000,
     }
     
     # Set up the config
     config = OmegaConf.load(f'results/{model_name}/config.yaml')
-    config.data.batch_size = 64  # Adjust batch size as needed
+    config.data.batch_size = 256  # Adjust batch size as needed
     config.data.num_workers = 4
     
     # Load the model
@@ -71,6 +71,7 @@ def encode_imagenet_dogs():
             dummy_cond = 0
             dummy_caption = []
             code, token_ids, _ = model._quantize(prequantized_code, dummy_cond, dummy_caption)
+            # print(f'code.size(): {code.size()}')
             # print(f'token_ids.size(): {token_ids.size()}')
             token_ids = token_ids.view((bs, -1))
             # print(f'token_ids.size(): {token_ids.size()}')
@@ -81,14 +82,15 @@ def encode_imagenet_dogs():
                     image_info = dataset.index[start_idx + i]
                     image_name = image_info['name'].split('/')[-1]  # Get just the JPEG filename
                     encoded_tokens[image_name] = token_ids[i].cpu().numpy().tolist()
-    
-    # Save the encoded tokens to JSON
-    output_file = f"encoded_tokens_{model_name}.json"
-    with open(output_file, 'w') as f:
-        json.dump(encoded_tokens, f)
+
+            if (batch_idx % 1000 == 0) or (batch_idx >= len(dataloader) - 1):
+                # Save the encoded tokens to JSON
+                output_file = f"encoded_tokens_{model_name}.json"
+                with open(output_file, 'w') as f:
+                    json.dump(encoded_tokens, f)
     
     print(f"Encoded tokens saved to {output_file}")
     print(f"Total images encoded: {len(encoded_tokens)}")
 
 if __name__ == "__main__":
-    encode_imagenet_dogs()
+    encode_imagenet()

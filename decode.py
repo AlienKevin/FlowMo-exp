@@ -3,20 +3,18 @@ import json
 import os
 from omegaconf import OmegaConf
 from flowmo import train_utils
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 import torchvision
-import numpy as np
-from einops import rearrange
+import einops
 
 def decode_images():
     # Choose your model
-    model_name = "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain"
+    model_name = "flowmo_lo"
     encoded_file = f"encoded_tokens_{model_name}.json"
     output_dir = "decoded_image_samples"
 
     zoo = {
-        "dogs_flowmo_lo_c2i_larp_ibq_rand_sg_128x128_pretrain": 150000,
+        "flowmo_lo": 1325000,
     }
 
     # Set up the config
@@ -61,31 +59,30 @@ def decode_images():
             os.makedirs(class_dir, exist_ok=True)
             
             token_ids = torch.LongTensor(token_ids_list).cuda().unsqueeze(0)
+            
+            # Convert token_ids to code
+            code_length = model.code_length
+            
+            # Decode token ids to get the quantized vectors (-1 or 1).
+            # The shape will be (batch_size, num_tokens, quantizer_dim)
+            decoded_code = model.quantizer.decode(token_ids)
+            
+            # Reshape to match the structure before the final rearrange in _quantize
+            # The shape of `quantized` in _quantize after quantizer call is (b, d, ...)
+            # so we permute (b, n, d) to (b, d, n)
+            decoded_code = decoded_code.permute(0, 2, 1)
 
-            # Get codebook entries from token IDs
-            code_length = config.model.code_length
-            context_dim = config.model.context_dim
-            codebook_size_for_entropy = config.model.codebook_size_for_entropy
-            
-            fh = context_dim // codebook_size_for_entropy
-            
-            # Reshape tokens to how they were before flattening in encode.py
-            # The quantizer in larp_ibq returns indices of shape [batch_size, seq_len]
-            # where seq_len is t * fh, and t is code_length.
-            seq_len = code_length * fh
-            
-            # The JSON stores a flat list, get_codebook_entry expects flattened indices.
-            indices = token_ids.view(-1)
-
-            # Shape for get_codebook_entry should be (batch_size, seq_len, codebook_dim)
-            # but the function expects (batch, t, channel).
-            # t here is seq_len, channel is codebook_size_for_entropy (fg)
-            shape = (1, seq_len, codebook_size_for_entropy)
-            
-            quantized = model.quantizer.quantizer.get_codebook_entry(indices, shape)
-            
-            # Rearrange back to (batch, code_length, context_dim)
-            code = rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=code_length, fh=fh)
+            # Rearrange back to (b, code_length, context_dim)
+            # 'b d (t fh) -> b t (d fh)'
+            # b = batch size (1)
+            # d = quantizer_dim
+            # t = code_length
+            # fh = (num_tokens / code_length) = (context_dim / quantizer_dim)
+            code = einops.rearrange(
+                decoded_code,
+                'b d (t fh) -> b t (d fh)',
+                t=code_length
+            )
 
             # Reconstruct image from code
             reconstructed_image = model.reconstruct(images=torch.zeros(1, 3, config.data.image_size, config.data.image_size).cuda(), code=code)
