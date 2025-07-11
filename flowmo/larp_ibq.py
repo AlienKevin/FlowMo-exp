@@ -130,21 +130,29 @@ class LARPQuantizer(nn.Module):
         # 3. Autoregressive Prior Model
         # Prior input: quantized shifted by one (predict next token)
         # Prior target: actual next token indices
-        prior_input = rearrange(quantized.detach() if prior_stop_grad else quantized, "b d t -> b t d")
-        prior_target_indices = (indices.detach() if prior_stop_grad else indices).reshape(batch_size, seq_len)
+        prior_input_base = rearrange(quantized, "b d t -> b t d")
+        prior_target_indices = indices.reshape(batch_size, seq_len)
 
-        # Get v_bar from prior model
-        prior_input = self.prior_model_project_in(prior_input)
-        cond_embeddings = self.prior_model_cls_embedding(cond, train=self.training)
-
-        prior_input = torch.cat((cond_embeddings, prior_input[:, :-1, :]), dim=1)
-        prior_output = self.prior_model(inputs_embeds=prior_input, output_hidden_states=True).hidden_states[-1]
-        # predicted: [B, seq_len, codebook_dim]
-        predicted = self.prior_model_project_out(prior_output)
+        # --- Path for prior_loss (no gradients to encoder) ---
+        # Detach the input from the encoder to prevent gradients from flowing back.
+        # The prior model's weights will be updated by prior_loss.
+        prior_input_for_loss = self.prior_model_project_in(prior_input_base.detach())
+        cond_embeddings_for_loss = self.prior_model_cls_embedding(cond, train=self.training)
+        prior_input_for_loss = torch.cat((cond_embeddings_for_loss, prior_input_for_loss[:, :-1, :]), dim=1)
+        prior_output_for_loss = self.prior_model(inputs_embeds=prior_input_for_loss, output_hidden_states=True).hidden_states[-1]
+        predicted_for_loss = self.prior_model_project_out(prior_output_for_loss)
         
+        # --- Path for z_q (gradients flow to encoder) ---
+        # Use the original, non-detached input to maintain the gradient path.
+        projected_input_for_zq = self.prior_model_project_in(prior_input_base)
+        cond_embeddings_for_zq = self.prior_model_cls_embedding(cond, train=self.training)
+        prior_input_for_zq = torch.cat((cond_embeddings_for_zq.detach(), projected_input_for_zq[:, :-1, :]), dim=1)
+        prior_output_for_zq = self.prior_model(inputs_embeds=prior_input_for_zq, output_hidden_states=True).hidden_states[-1]
+        predicted_for_zq = self.prior_model_project_out(prior_output_for_zq)
+
         # # 4. Calculate NLL loss (Lprior)
-        logits = torch.einsum('btd,cd->btc', predicted, codebook)
-        
+        logits = torch.einsum('btd,cd->btc', predicted_for_loss, codebook)
+
         # Probabilities p = softmax(s)
         # NLL loss: F.cross_entropy expects logits [N, C] and targets [N]
         prior_loss = F.cross_entropy(
@@ -152,4 +160,15 @@ class LARPQuantizer(nn.Module):
             prior_target_indices.reshape(-1)          # [B*(T-1)]
         )
 
-        return quantized, (prior_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices
+        logits_for_zq = torch.einsum('btd,cd->btc', predicted_for_zq, codebook)
+
+        dim = 1
+        logits = logits_for_zq.permute(0, 2, 1)
+        soft_one_hot = F.softmax(logits, dim=dim)
+        ind = soft_one_hot.max(dim, keepdim=True)[1]
+        hard_one_hot = torch.zeros_like(logits, memory_format=torch.legacy_contiguous_format).scatter_(dim, ind, 1.0)
+        one_hot = hard_one_hot - soft_one_hot.detach() + soft_one_hot
+
+        z_q = torch.einsum('bct,cd->bdt', one_hot, self.quantizer.embedding.weight)
+
+        return z_q, (prior_loss, commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices
