@@ -132,18 +132,22 @@ def main(args, config):
             opt_cls = optim.Adam
 
     encoder_pg = {
+        "name": "encoder",
         "params": [p for (n, p) in model.named_parameters() if "encoder" in n],
         "lr": config.opt.lr,
     }
     decoder_pg = {
+        "name": "decoder",
         "params": [p for (n, p) in model.named_parameters() if "decoder" in n],
         "lr": config.opt.lr,
     }
     prior_pg = {
+        "name": "prior",
         "params": [p for (n, p) in model.named_parameters() if "prior_model" in n],
         "lr": config.opt.lr * config.prior.lr_multiplier,
     }
     quantizer_pg = {
+        "name": "quantizer",
         "params": [p for (n, p) in model.named_parameters() if ("quantizer" in n and "prior_model" not in n)],
         "lr": config.opt.lr,
     }
@@ -159,9 +163,18 @@ def main(args, config):
         return optimizer
 
     optimizer = build_optimizer([encoder_pg, decoder_pg, prior_pg, quantizer_pg])
+    base_lrs = {pg["name"]: pg["lr"] for pg in [encoder_pg, decoder_pg, prior_pg, quantizer_pg]}
     rebuilt_optimizer = False
 
     train_dataloader = train_utils.load_dataset(config, split='train')
+
+    warmup_steps = 0
+    if config.opt.get("warmup_epochs", 0) > 0:
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        steps_per_epoch = len(train_dataloader.dataset) // (config.data.batch_size * world_size)
+        warmup_steps = int(steps_per_epoch * config.opt.warmup_epochs)
+        if rank == 0:
+            print(f"Using learning rate warmup for {warmup_steps} steps.")
 
     if rank == 0:
         writer = SummaryWriter(log_dir)
@@ -219,11 +232,22 @@ def main(args, config):
     aux_state["dl_iter"] = dl_iter
 
     while total_steps <= config.trainer.max_steps:
+        if total_steps < warmup_steps:
+            lr_scale = (total_steps + 1) / warmup_steps
+            for pg in optimizer.param_groups:
+                pg['lr'] = base_lrs[pg['name']] * lr_scale
+        elif total_steps == warmup_steps:
+            if rank == 0:
+                print("Finished warmup.")
+            for pg in optimizer.param_groups:
+                pg['lr'] = base_lrs[pg['name']]
+        
         model.train()
         if config.opt.freeze_encoder or total_steps >= config.opt.freeze_encoder_after:
             if not rebuilt_optimizer:
                 print(f"Rebuilding optimizer at step {total_steps}")
                 prior_pg['lr'] = config.opt.lr
+                base_lrs['prior'] = config.opt.lr
                 model.module.config.prior.loss_weight = 1.0
                 # model.module.config.prior.stop_grad = True
                 optimizer = build_optimizer([decoder_pg, prior_pg])
@@ -281,6 +305,9 @@ def main(args, config):
             }
             reserved_gb = torch.cuda.max_memory_reserved() / 1e9
             allocated_gb = torch.cuda.max_memory_allocated() / 1e9
+
+            for pg in optimizer.param_groups:
+                running_losses[f"lr/{pg['name']}"] = pg["lr"]
 
             with torch.no_grad():
                 encoder_checksum = sum(
