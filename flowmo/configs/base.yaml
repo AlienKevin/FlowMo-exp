@@ -71,6 +71,7 @@ trainer:
   max_steps: 10000000000000
   keep_every: 200000
   gs_checkpoint_bucket: ""
+  hf_handle: AlienKevin
 
 eval:
   reconstruction: True

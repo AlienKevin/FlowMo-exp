@@ -16,6 +16,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
 from flowmo import data, models
+from huggingface_hub import create_repo, hf_hub_download, list_repo_files, upload_file
 
 
 def get_args_and_unknown():
@@ -205,12 +206,34 @@ def build_model(config):
 
 
 def load_state_dict(path):
+    """Load a state dict from a local path, GCS, or Hugging Face Hub."""
     if path.startswith("gs"):
         fs = fsspec.filesystem("gs")
         with fs.open(path, "rb") as gs_file:
             state_dict = torch.load(gs_file, map_location="cpu")
-    else:
+    elif os.path.exists(path):
         state_dict = torch.load(path, map_location="cpu")
+    else:
+        # Try to load from Hugging Face Hub
+        try:
+            print(f"Checkpoint not found at {path}, trying to load from Hugging Face Hub.")
+            repo_id, *filename_parts = path.split("/")
+            if len(filename_parts) >= 2:  # e.g., org/repo/file.pth
+                repo_id = f"{repo_id}/{filename_parts[0]}"
+                filename = "/".join(filename_parts[1:])
+            elif len(filename_parts) == 1:  # e.g., repo/file.pth
+                filename = filename_parts[0]
+            else:
+                raise ValueError(f"Invalid HF path: {path}")
+
+            downloaded_path = hf_hub_download(repo_id=repo_id, filename=filename)
+            state_dict = torch.load(downloaded_path, map_location="cpu")
+            print(f"Successfully loaded {filename} from {repo_id}.")
+        except Exception as e:
+            raise FileNotFoundError(
+                f"Failed to load checkpoint from Hugging Face Hub repo {path}: {e}"
+            )
+
     return state_dict
 
 
@@ -218,7 +241,9 @@ def load_state_dict(path):
 def restore_from_ckpt(model, optimizer, path):
     print("Restoring from checkpoint!", path)
     state_dict = load_state_dict(path)
-    missing_keys, unexpected_keys = model.load_state_dict(state_dict["model_state_dict"], strict=False)
+    missing_keys, unexpected_keys = model.load_state_dict(
+        state_dict["model_state_dict"], strict=False
+    )
     if missing_keys:
         print(f"Warning: Missing keys during state dict load: {missing_keys}")
     if unexpected_keys:
@@ -242,7 +267,26 @@ def cpu_state_dict(model, ignore_modules=()):
             
     return filtered_state_dict
 
-def get_last_checkpoint(config, logdir):
+
+def upload_to_hf(local_path, repo_id):
+    """Uploads a file to Hugging Face Hub, error-resistant."""
+    if not repo_id:
+        return
+    try:
+        print(f"Uploading {local_path} to {repo_id} on Hugging Face Hub...")
+        create_repo(repo_id, exist_ok=True)
+        upload_file(
+            path_or_fileobj=local_path,
+            path_in_repo=os.path.basename(local_path),
+            repo_id=repo_id,
+        )
+        print(f"Successfully uploaded {local_path} to {repo_id}")
+    except Exception as e:
+        print(f"Warning: Failed to upload checkpoint to Hugging Face Hub: {e}")
+
+
+def get_last_checkpoint(config, logdir, hf_repo_id=None):
+    """Gets the last checkpoint from local, GCS, or Hugging Face Hub."""
     if config.trainer.gs_checkpoint_bucket:
         fs = fsspec.filesystem("gs")
         all_checkpoints = fs.glob(
@@ -257,11 +301,26 @@ def get_last_checkpoint(config, logdir):
         all_checkpoints_sorted = sorted(
             glob.glob(os.path.join(logdir, "checkpoints", "*.pth"))
         )
+    
+    print(all_checkpoints_sorted)
 
     if all_checkpoints_sorted:
         return all_checkpoints_sorted[-1]
-    else:
-        return None
+
+    # If no local or GCS checkpoint, check Hugging Face Hub
+    if hf_repo_id:
+        try:
+            print(f"No local/GCS checkpoint found. Checking HF repo: {hf_repo_id}")
+            files = list_repo_files(repo_id=hf_repo_id)
+            checkpoints = sorted([f for f in files if f.endswith(".pth")])
+            if checkpoints:
+                latest_hf_checkpoint = checkpoints[-1]
+                print(f"Found latest checkpoint on HF: {latest_hf_checkpoint}")
+                return f"{hf_repo_id}/{latest_hf_checkpoint}"
+        except Exception as e:
+            print(f"Could not find checkpoint on Hugging Face Hub: {e}")
+
+    return None
 
 
 class SimpleEMA:

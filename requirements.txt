@@ -7,3 +7,8 @@ fsspec[gcs]
 mup==1.0.0
 ipykernel
 scikit-image
+webdataset
+huggingface_hub
+transformers
+torch==2.7.1
+torchvision

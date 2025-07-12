@@ -182,10 +182,16 @@ def main(args, config):
             name=args.experiment_name,
             config=OmegaConf.to_container(config, resolve=True),
         )
+        if config.trainer.get("hf_handle"):
+            repo_id = (
+                f"{config.trainer.hf_handle}/{args.experiment_name}"
+            )
+        else:
+            repo_id = None
 
     total_steps = 0
 
-    latest_ckpt = train_utils.get_last_checkpoint(config, log_dir)
+    latest_ckpt = train_utils.get_last_checkpoint(config, log_dir, hf_repo_id=repo_id)
     if latest_ckpt:
         total_steps = train_utils.restore_from_ckpt(model.module, optimizer, path=latest_ckpt)
     elif args.resume_from_ckpt:
@@ -360,6 +366,9 @@ def main(args, config):
                         local_checkpoint_path,
                     )
 
+                if os.path.exists(local_checkpoint_path):
+                    train_utils.upload_to_hf(local_checkpoint_path, repo_id)
+
                 gcs_checkpoint_dir = os.path.join(
                     config.trainer.gs_checkpoint_bucket, f"{log_dir}/checkpoints"
                 )
@@ -411,6 +420,8 @@ def main(args, config):
                         },
                         checkpoint_path,
                     )
+                if os.path.exists(checkpoint_path):
+                    train_utils.upload_to_hf(checkpoint_path, repo_id)
 
                 # Remove old checkpoints
                 for checkpoint in sorted(
