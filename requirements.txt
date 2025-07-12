@@ -12,3 +12,5 @@ huggingface_hub
 transformers
 torch==2.7.1
 torchvision
+wandb
+einx
