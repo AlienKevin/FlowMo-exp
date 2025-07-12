@@ -158,7 +158,7 @@ class ImageNetWebDataset(IterableDataset):
         #     self.captions[file_name] = caption
 
         self.dataset = (
-            wds.WebDataset(self.url, shardshuffle=100)
+            wds.WebDataset(self.url, shardshuffle=100, nodesplitter=wds.split_by_node)
             .shuffle(buffer_size)
             .decode("pil")
             .rename(image="jpg;jpeg", label="cls")
