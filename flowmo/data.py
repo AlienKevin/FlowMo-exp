@@ -146,16 +146,16 @@ class ImageNetWebDataset(IterableDataset):
         # Use curl to get around redirection issues
         self.url = f"pipe:curl -s -L '{self.url}' -H 'Authorization:Bearer {hf_token}'"
 
-        self.captions = {}
-        captions_df = pd.read_csv(
-            "imagenet_gemma3_12b.tsv",
-            sep="\t",
-            header=None,
-            names=["file_name", "caption"],
-        )
-        for _, row in captions_df.iterrows():
-            file_name, caption = row["file_name"], row["caption"]
-            self.captions[file_name] = caption
+        # self.captions = {}
+        # captions_df = pd.read_csv(
+        #     "imagenet_gemma3_12b.tsv",
+        #     sep="\t",
+        #     header=None,
+        #     names=["file_name", "caption"],
+        # )
+        # for _, row in captions_df.iterrows():
+        #     file_name, caption = row["file_name"], row["caption"]
+        #     self.captions[file_name] = caption
 
         self.dataset = (
             wds.WebDataset(self.url, shardshuffle=100)
@@ -172,12 +172,12 @@ class ImageNetWebDataset(IterableDataset):
         image = (image / 127.5 - 1.0).astype(np.float32)
 
         key = sample["__key__"]
-        caption = self.captions.get(f"{key}.JPEG", "") # Assume .JPEG extension
+        # caption = self.captions.get(f"{key}.JPEG", "") # Assume .JPEG extension
 
         return {
             "image": image,
             "label": sample["label"],
-            "caption": caption,
+            "caption": "",
         }
 
     def __iter__(self):
