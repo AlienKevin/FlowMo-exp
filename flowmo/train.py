@@ -11,10 +11,10 @@ import lpips
 import torch
 import torch.distributed as dist
 import torch.optim as optim
+import wandb
 from mup import MuAdam, MuAdamW
 from omegaconf import OmegaConf
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.tensorboard import SummaryWriter
 
 from flowmo import models, perceptual_loss, train_utils
 
@@ -177,7 +177,11 @@ def main(args, config):
             print(f"Using learning rate warmup for {warmup_steps} steps.")
 
     if rank == 0:
-        writer = SummaryWriter(log_dir)
+        wandb.init(
+            project="flowmo",
+            name=args.experiment_name,
+            config=OmegaConf.to_container(config, resolve=True),
+        )
 
     total_steps = 0
 
@@ -327,11 +331,8 @@ def main(args, config):
             )
 
             if rank == 0:
-                for k, v in running_losses.items():
-                    writer.add_scalar(k, v, global_step=total_steps)
-                writer.add_scalar(
-                    "Steps per sec", steps_per_sec, global_step=total_steps
-                )
+                log_data = {**running_losses, "Steps per sec": steps_per_sec}
+                wandb.log(log_data, step=total_steps)
 
             tic = time.time()
             running_losses = dict()
@@ -426,6 +427,9 @@ def main(args, config):
                         allocated_gb=torch.cuda.max_memory_allocated() / 1e9,
                     )
                 )
+
+    if rank == 0:
+        wandb.finish()
 
 
 if __name__ == "__main__":

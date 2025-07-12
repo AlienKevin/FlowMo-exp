@@ -11,13 +11,13 @@ import lpips
 import numpy as np
 import torch
 import torch.distributed as dist
+import wandb
 from omegaconf import OmegaConf
 from PIL import Image
 from scipy import linalg
 from skimage.metrics import peak_signal_noise_ratio as psnr_loss
 from skimage.metrics import structural_similarity as ssim_loss
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from flowmo import train_utils
@@ -372,10 +372,17 @@ def main(args, config):
 
     train_utils.soft_init()
 
+    rank = dist.get_rank()
+    if rank == 0:
+        wandb.init(
+            project="flowmo-eval",
+            name=f"eval: {args.experiment_name}",
+            config=OmegaConf.to_container(config, resolve=True),
+        )
+
     evaluated_checkpoints = set()
     eval_dir = config.eval.eval_dir
     assert eval_dir, eval_dir
-    writer = SummaryWriter(eval_dir)
 
     # seed = config.global_seed * dist.get_world_size() + dist.get_rank()
     seed = config.global_seed
@@ -383,7 +390,6 @@ def main(args, config):
 
     print(OmegaConf.to_yaml(config))
 
-    rank = dist.get_rank()
     # print(dist.get_world_size())
     print(dist.get_rank())
     print(torch.cuda.device_count())
@@ -421,17 +427,15 @@ def main(args, config):
         torch.distributed.barrier()
 
         if dist.get_rank() == 0 and not config.eval.eval_baseline:
-            for metric in metrics:
-                writer.add_scalar(
-                    main_tag + metric,
-                    metrics[metric],
-                    global_step=total_steps,
-                )
+            wandb.log({main_tag + k: v for k, v in metrics.items()}, step=total_steps)
         evaluated_checkpoints.add(checkpoint_path)
 
         del state_dict, model, images
         if not config.eval.continuous:
-            return
+            break
+
+    if rank == 0:
+        wandb.finish()
 
 
 if __name__ == "__main__":
