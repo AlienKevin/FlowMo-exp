@@ -19,7 +19,7 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 
 from flowmo import lookup_free_quantize
-from flowmo import ibq, larp, larp_ibq
+from flowmo import ibq, larp, larp_ibq, fsq
 
 MUP_ENABLED = True
 
@@ -549,6 +549,8 @@ class FlowMo(nn.Module):
                 num_codebooks=1,
                 token_factorization=False,
             )
+        elif self.config.model.quantization_type == "fsq":
+            self.quantizer = fsq.FSQ(config.model.fsq_levels)
         elif config.model.quantization_type == 'ibq':
             self.quantizer = ibq.IndexPropagationQuantize(
                 codebook_size=2**self.config.model.codebook_size_for_entropy,
@@ -694,18 +696,13 @@ class FlowMo(nn.Module):
             quantizer_loss = _kl_diagonal_gaussian(mean, logvar)
             aux = {"quantizer_loss": quantizer_loss}
         elif self.config.model.quantization_type == "lfq":
-            assert f % self.config.model.codebook_size_for_entropy == 0, f
-            code = einops.rearrange(
-                code,
-                "b t (fg fh) -> b fg (t fh)",
-                fg=self.config.model.codebook_size_for_entropy,
-            )
+            code = einops.rearrange(code, "b t f -> b f t")
 
             (quantized, entropy_aux_loss, indices), breakdown = self.quantizer(
                 code, return_loss_breakdown=True
             )
             assert quantized.shape == code.shape
-            quantized = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
+            quantized = einops.rearrange(quantized, "b f t -> b t f", t=t)
 
             quantizer_loss = (
                 entropy_aux_loss * self.config.model.entropy_loss_weight
@@ -718,6 +715,9 @@ class FlowMo(nn.Module):
             aux["vq_per_sample_entropy"] = breakdown.per_sample_entropy
             aux["vq_codebook_entropy"] = breakdown.codebook_entropy
             aux["vq_codebook_usage"] = torch.tensor(indices.unique().numel() / self.quantizer.codebook_size * 100)
+        elif self.config.model.quantization_type == "fsq":
+            code, indices = self.quantizer(code)
+            aux = {"vq_codebook_usage": torch.tensor(indices.unique().numel() / self.quantizer.codebook_size * 100)}
         elif self.config.model.quantization_type == "ibq":
             code = einops.rearrange(code, "b t f -> b f t")
 
