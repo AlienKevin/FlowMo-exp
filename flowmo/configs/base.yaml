@@ -11,6 +11,7 @@ data:
   imagenet_train_tar: "/svl/u/ksarge/ILSVRC2012_img_train.tar"
   imagenet_val_index: "imagenet_val_index_overall.json"
   imagenet_val_tar: "/svl/u/ksarge/ILSVRC2012_img_val.tar"
+  use_wds: False
 
 model:
   enable_mup: True
@@ -58,6 +59,7 @@ opt:
   log_norms: True
   lpips_weight: 0.1
   lpips_mode: "vgg"
+  warmup_epochs: 0
 
   beta1: .9
   beta2: .95

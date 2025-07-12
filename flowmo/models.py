@@ -552,7 +552,7 @@ class FlowMo(nn.Module):
         elif config.model.quantization_type == 'ibq':
             self.quantizer = ibq.IndexPropagationQuantize(
                 codebook_size=2**self.config.model.codebook_size_for_entropy,
-                e_dim=self.config.model.codebook_size_for_entropy,
+                e_dim=self.config.model.context_dim,
             )
         elif config.model.quantization_type == 'larp_ibq':
             self.quantizer = larp_ibq.LARPQuantizer(self.config)
@@ -719,16 +719,11 @@ class FlowMo(nn.Module):
             aux["vq_codebook_entropy"] = breakdown.codebook_entropy
             aux["vq_codebook_usage"] = torch.tensor(indices.unique().numel() / self.quantizer.codebook_size * 100)
         elif self.config.model.quantization_type == "ibq":
-            assert f % self.config.model.codebook_size_for_entropy == 0, f
-            code = einops.rearrange(
-                code,
-                "b t (fg fh) -> b fg (t fh)",
-                fg=self.config.model.codebook_size_for_entropy,
-            )
+            code = einops.rearrange(code, "b t f -> b f t")
 
             quantized, (commit_loss, double_quant_loss, per_sample_entropy, codebook_entropy, entropy_aux_loss), indices = self.quantizer(code)
             assert quantized.shape == code.shape
-            quantized = einops.rearrange(quantized, "b fg (t fh) -> b t (fg fh)", t=t)
+            quantized = einops.rearrange(quantized, "b f t -> b t f", t=t)
 
             quantizer_loss = (
                 entropy_aux_loss * self.config.model.entropy_loss_weight

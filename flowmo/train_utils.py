@@ -95,9 +95,9 @@ def wrap_dataloader(dataloader):
 
 def load_dataset(config, split, shuffle_val=False):
     if split == "train":
-        dataset = data.IndexedTarDataset(
-            config.data.imagenet_train_tar,
-            config.data.imagenet_train_index,
+        dataset = (data.ImageNetWebDataset if config.data.use_wds else data.IndexedTarDataset)(
+            imagenet_tar=config.data.imagenet_train_tar,
+            imagenet_index=config.data.imagenet_train_index,
             size=config.data.image_size,
             random_crop=True,
         )
@@ -105,16 +105,16 @@ def load_dataset(config, split, shuffle_val=False):
             dataset,
             batch_size=config.data.batch_size,
             num_workers=config.data.num_workers,
-            shuffle=True,
+            shuffle=None if config.data.use_wds else True,
             pin_memory=True,
             drop_last=True,
         )
         dataloader.sampler.replacement = True
         return dataloader
     elif split == "val":
-        dataset = data.IndexedTarDataset(
-            config.data.imagenet_val_tar,
-            config.data.imagenet_val_index,
+        dataset = (data.ImageNetWebDataset if config.data.use_wds else data.IndexedTarDataset)(
+            imagenet_tar=config.data.imagenet_val_tar,
+            imagenet_index=config.data.imagenet_val_index,
             size=config.data.image_size,
             random_crop=False,
         )
@@ -122,7 +122,7 @@ def load_dataset(config, split, shuffle_val=False):
             dataset,
             batch_size=config.data.batch_size,
             num_workers=config.data.num_workers,
-            shuffle=shuffle_val,
+            shuffle=None if config.data.use_wds else shuffle_val,
             pin_memory=True,
             drop_last=False,
         )
