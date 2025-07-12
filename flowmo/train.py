@@ -176,18 +176,18 @@ def main(args, config):
         if rank == 0:
             print(f"Using learning rate warmup for {warmup_steps} steps.")
 
+    repo_id = None
+    if config.trainer.get("hf_handle"):
+        repo_id = (
+            f"{config.trainer.hf_handle}/{args.experiment_name}"
+        )
+
     if rank == 0:
         wandb.init(
             project="flowmo",
             name=args.experiment_name,
             config=OmegaConf.to_container(config, resolve=True),
         )
-        if config.trainer.get("hf_handle"):
-            repo_id = (
-                f"{config.trainer.hf_handle}/{args.experiment_name}"
-            )
-        else:
-            repo_id = None
 
     total_steps = 0
 
