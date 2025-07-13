@@ -220,6 +220,7 @@ class DoubleStreamBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         qkv_bias: bool = False,
+        use_single_stream: bool = False,
     ):
         super().__init__()
 
@@ -238,19 +239,20 @@ class DoubleStreamBlock(nn.Module):
             nn.GELU(approximate="tanh"),
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
+        self.use_single_stream = use_single_stream
+        if not self.use_single_stream:
+            self.txt_mod = Modulation(hidden_size, double=True)
+            self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+            self.txt_attn = SelfAttention(
+                dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias
+            )
 
-        self.txt_mod = Modulation(hidden_size, double=True)
-        self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.txt_attn = SelfAttention(
-            dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias
-        )
-
-        self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.txt_mlp = nn.Sequential(
-            nn.Linear(hidden_size, mlp_hidden_dim, bias=True),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
-        )
+            self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+            self.txt_mlp = nn.Sequential(
+                nn.Linear(hidden_size, mlp_hidden_dim, bias=True),
+                nn.GELU(approximate="tanh"),
+                nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
+            )
 
     def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor):
         pe_single, pe_double = pe
@@ -258,9 +260,14 @@ class DoubleStreamBlock(nn.Module):
         if vec is None:
             img_mod1, img_mod2 = ModulationOut(0, 1 - p, 1), ModulationOut(0, 1 - p, 1)
             txt_mod1, txt_mod2 = ModulationOut(0, 1 - p, 1), ModulationOut(0, 1 - p, 1)
+        elif self.use_single_stream:
+            img_mod1, img_mod2 = self.img_mod(vec)
         else:
             img_mod1, img_mod2 = self.img_mod(vec)
             txt_mod1, txt_mod2 = self.txt_mod(vec)
+
+        if self.use_single_stream:
+            img = torch.cat((txt, img), dim=1)
 
         # prepare image for attention
         img_modulated = self.img_norm1(img)
@@ -270,6 +277,17 @@ class DoubleStreamBlock(nn.Module):
             img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads
         )
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+
+        if self.use_single_stream:
+            img_attn = attention(img_q, img_k, img_v, pe=pe_double)
+
+            # calculate the img blocks
+            img = img + img_mod1.gate * self.img_attn.proj(img_attn)
+            img = img + img_mod2.gate * self.img_mlp(
+                (p + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift
+            )
+
+            return img[:, txt.shape[1]:], img[:, :txt.shape[1]]
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
@@ -352,6 +370,7 @@ class FluxParams:
     axes_dim: List[int]
     theta: int
     qkv_bias: bool
+    use_single_stream: bool
 
 
 DIT_ZOO = dict(
@@ -457,6 +476,7 @@ class Flux(nn.Module):
                     self.num_heads,
                     mlp_ratio=params.mlp_ratio,
                     qkv_bias=params.qkv_bias,
+                    use_single_stream=params.use_single_stream,
                 )
                 for idx in range(params.depth)
             ]
@@ -603,6 +623,7 @@ class FlowMo(nn.Module):
             context_dim=self.encoder_context_dim,
             patch_size=patch_size,
             depth=enc_depth,
+            use_single_stream=config.model.use_single_stream,
             **DIT_ZOO[self.dit_mode],
         )
         decoder_params = FluxParams(
@@ -610,6 +631,7 @@ class FlowMo(nn.Module):
             context_dim=context_dim + 1,
             patch_size=patch_size,
             depth=dec_depth,
+            use_single_stream=config.model.use_single_stream,
             **DIT_ZOO[self.dit_mode],
         )
 

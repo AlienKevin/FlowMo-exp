@@ -41,6 +41,8 @@ model:
   posttrain_sample_enable_cfg: False
   posttrain_sample_k: 8
 
+  use_single_stream: False
+
 prior:
   model_name: gptc-S
   lr_multiplier: 100
